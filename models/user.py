@@ -12,14 +12,27 @@ from sqlalchemy.orm import relationship
 class Client(Base):
     """Модель клиента кредитной компании с защитой данных
     Основные поля:
-    clientID            --- Integer, primary_key, autoincrement
-    fullName            --- String(100),nullable
-    passport            --- String(20), unique, nullable
-    telegram_id         --- BigInteger, unique, nullable
-    phone_numbers       --- JSON, nullable
-    email               --- String(100), unique, nullable
-    registration_date   --- DateTime
-    creditScore         --- Integer
+    ------------------------------------------------------------------------------
+    clientID            Уникальный внутренний ID клиента            INT, PK, AInc
+    ------------------------------------------------------------------------------
+    fullName            Полное имя (фамилия, имя, отчество)         STR(100)
+    ------------------------------------------------------------------------------
+    passport            Серия и номер паспорта (зашифровано)        STR(20), UQ
+    ------------------------------------------------------------------------------
+    telegram_id         ID Telegram для уведомлений                 BINT, UQ
+    ------------------------------------------------------------------------------
+    phone_numbers       Список телефонов в международном формате    JSON
+    ------------------------------------------------------------------------------
+    email               Контактный email (зашифровано)              STR(100), UQ0
+    ------------------------------------------------------------------------------
+    registration_date   Дата регистрации клиента                    DTime
+    ------------------------------------------------------------------------------
+    creditScore         Кредитный рейтинг (0-1000)                  INT
+    ------------------------------------------------------------------------------
+
+    ОТНОШЕНИЯ
+    Loan            inf ---- inf    Clients
+    CreditHistory   inf ---- inf    Clients
     """
     __tablename__ = "clients"
     __table_args__ = {
@@ -27,29 +40,30 @@ class Client(Base):
     }
 
     # Основные поля
-    clientID: Mapped[int] = mapped_column(Integer,primary_key=True,autoincrement=True,
+    clientID = Column(Integer,primary_key=True,autoincrement=True,
         comment="Уникальный внутренний ID клиента")
-    fullName: Mapped[str] = mapped_column(String(100),nullable=False,
+    fullName = Column(String(100),nullable=False,
         comment="Полное имя (фамилия, имя, отчество)")
-    passport: Mapped[str] = mapped_column(String(20),unique=True,nullable=False,
+    passport = Column(String(20),unique=True,nullable=False,
         comment="Серия и номер паспорта (зашифровано)" )
-    telegram_id: Mapped[int] = mapped_column(BigInteger,unique=True,nullable=True,
+    telegram_id = Column(BigInteger,unique=True,nullable=True,
         comment="ID Telegram для уведомлений")
-    phone_numbers: Mapped[list[str]] = mapped_column(JSON,nullable=False,
+    phone_numbers = Column(JSON,nullable=False,
         comment="Список телефонов в международном формате"
     )
-    email: Mapped[str] = mapped_column(String(100),unique=True,nullable=True,
+    email = Column(String(100),unique=True,nullable=True,
         comment="Контактный email (зашифровано)"
     )
-    registration_date: Mapped[datetime] = mapped_column(DateTime,default=datetime.utcnow,
+    registration_date = Column(DateTime,default=datetime.utcnow,
         comment="Дата регистрации клиента"
     )
-    creditScore: Mapped[int] = mapped_column(Integer,default=0,
+    creditScore = Column(Integer,default=0,
         comment="Кредитный рейтинг (0-1000)"
     )
 
     loans = relationship("Loan", back_populates="client", cascade="all, delete-orphan")
-
+    credit_history = relationship("CreditHistory", back_populates="client",
+                                cascade="all, delete-orphan")
     # Методы валидации
     @staticmethod
     def validate_phone(phone: str) -> str:
@@ -186,8 +200,33 @@ class CreditHistory():
         comment="Уникальный внутренний ID клиента")
     loanID: Mapped[int] = mapped_column(Integer,
         comment="ID кредита (общие-организационный)")
-    #bankID: Mapped[int] = mapped_column(Integer, ForeignKey())
+    bankID: Mapped[int] = mapped_column(Integer, ForeignKey('bank_name.bankID'),
+        comment='Название банка кредитования')
     fullname: Mapped[str] = mapped_column(String(100), nullable=False,
         comment="Полное имя клиента")
     passport: Mapped[int] = mapped_column(Integer, nullable=False,
         comment="Паспортные данные клиента")
+    status: Mapped[Enum] = mapped_column(Enum(LoanStatus),nullable=False, default=LoanStatus.UNKNOW,
+        comment="Статус кредита")
+    issue_date:Mapped[datetime] = mapped_column(Date, nullable=False,
+        comment='Дата выдачи кредита')
+    amount = Column(Numeric(15, 2), nullable=False,
+        comment='Изначальная сумма кредита')
+    term = Column(Integer, nullable=False,
+        comment='Срок кредита в месяцах')
+    interest_rate = Column(Numeric(5, 2), nullable=False,
+        comment='Процентная ставка (годовых)')
+
+    status = Column(Enum(LoanStatus), default=LoanStatus.UNKNOW,
+        comment='Текущий статус кредита')
+
+    # Связь с клиентом (только для наших клиентов)
+    client = relationship("Client", back_populates="credit_history")
+
+    def __repr__(self):
+        return (f"<CreditHistory {self.history_id} (Bank: {self.bank_name}, "
+                f"Amount: {self.amount}, Status: {self.status.value})>")
+
+    def is_external(self) -> bool:
+        """Проверяет, является ли кредит внешним (не из нашей системы)"""
+        return self.loan_id is None or not hasattr(self, 'loan')
