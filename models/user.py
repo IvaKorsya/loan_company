@@ -7,62 +7,45 @@ from pydantic import EmailStr, BaseModel  # pip install pydantic[email]
 
 
 class Client(Base):
-    """Модель клиента кредитной компании с защитой данных"""
+    """Модель клиента кредитной компании с защитой данных
+    Основные поля:
+    clientID            --- Integer, primary_key, autoincrement
+    fullName            --- String(100),nullable
+    passport            --- String(20), unique, nullable
+    telegram_id         --- BigInteger, unique, nullable
+    phone_numbers       --- JSON, nullable
+    email               --- String(100), unique, nullable
+    registration_date   --- DateTime
+    creditScore         --- Integer
+    """
     __tablename__ = "clients"
     __table_args__ = {
         'comment': 'Таблица клиентов кредитной организации'
     }
 
     # Основные поля
-    clientID: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-        autoincrement=True,
+    clientID: Mapped[int] = mapped_column(Integer,primary_key=True,autoincrement=True,
         comment="Уникальный внутренний ID клиента"
     )
-
-    fullName: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
+    fullName: Mapped[str] = mapped_column(String(100),nullable=False,
         comment="Полное имя (фамилия, имя, отчество)"
     )
-
-    passport: Mapped[str] = mapped_column(
-        String(20),
-        unique=True,
-        nullable=False,
+    passport: Mapped[str] = mapped_column(String(20),unique=True,nullable=False,
         comment="Серия и номер паспорта (зашифровано)"
     )
-
-    telegram_id: Mapped[int] = mapped_column(
-        BigInteger,
-        unique=True,
-        nullable=True,
+    telegram_id: Mapped[int] = mapped_column(BigInteger,unique=True,nullable=True,
         comment="ID Telegram для уведомлений"
     )
-
-    phone_numbers: Mapped[list[str]] = mapped_column(
-        JSON,
-        nullable=False,
+    phone_numbers: Mapped[list[str]] = mapped_column(JSON,nullable=False,
         comment="Список телефонов в международном формате"
     )
-
-    email: Mapped[str] = mapped_column(
-        String(100),
-        unique=True,
-        nullable=True,
+    email: Mapped[str] = mapped_column(String(100),unique=True,nullable=True,
         comment="Контактный email (зашифровано)"
     )
-
-    registration_date: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
+    registration_date: Mapped[datetime] = mapped_column(DateTime,default=datetime.utcnow,
         comment="Дата регистрации клиента"
     )
-
-    creditScore: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
+    creditScore: Mapped[int] = mapped_column(Integer,default=0,
         comment="Кредитный рейтинг (0-1000)"
     )
 

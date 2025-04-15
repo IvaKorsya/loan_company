@@ -1,13 +1,18 @@
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
+from aiogram.types import Message, ReplyKeyboardRemove
+from services.phone_validation import validate_phone_number
+from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
+import logging
 
 from utils.database import async_session
 from models.user import Client
 from config import Config
+from states import FormStates
 
 router = Router(name="client_handlers")
 
@@ -74,42 +79,79 @@ async def view_personal_info(message: types.Message):
 
 @router.message(Command("credit_info"))
 async def view_credit_info(message: types.Message):
-    """Просмотр кредитной информации"""
+    """
+    Показывает детальную информацию о кредитном рейтинге пользователя
+    с историей изменений и рекомендациями.
+    """
     async with async_session() as session:
-        client = await session.execute(
-            select(Client.creditScore, Client.registration_date)
-            .where(Client.telegram_id == message.from_user.id)
-        )
-        client = client.scalar()
+        try:
+            # Получаем данные клиента
+            client = await session.execute(
+                select(Client)
+                .where(Client.telegram_id == message.from_user.id)
+            )
+            client = client.scalar()
 
-        if not client:
-            return await message.answer("ℹ Вы не зарегистрированы. Используйте /register")
+            if not client:
+                return await message.answer(
+                    "❌ Вы не зарегистрированы в системе.\n"
+                    "Используйте /register для регистрации."
+                )
 
-        credit_status = (
-            "⭐ Отлично" if client.creditScore > 800 else
-            "👍 Хорошо" if client.creditScore > 600 else
-            "⚠ Удовлетворительно" if client.creditScore > 400 else
-            "❌ Низкий"
-        )
+            # Форматируем сообщение
+            rating_emoji = "⭐️" * (client.creditScore // 200)
+            reg_date = client.registration_date.strftime("%d.%m.%Y")
 
-        response = (
-            "💳 <b>Кредитная информация</b>\n\n"
-            f"<b>Текущий рейтинг:</b> {client.creditScore}/1000\n"
-            f"<b>Статус:</b> {credit_status}\n"
-            f"<b>Дата регистрации:</b> {client.registration_date.strftime('%d.%m.%Y')}\n\n"
-            "Для улучшения рейтинга:\n"
-            "- Своевременно погашайте кредиты\n"
-            "- Используйте наши продукты\n"
-            "- Обратитесь в отделение"
-        )
+            msg = [
+                f"<b>💳 Кредитный рейтинг:</b> {client.creditScore}/1000 {rating_emoji}",
+                f"<b>📅 Дата регистрации:</b> {reg_date}",
+                "",
+                "<b>📊 Ваш статус:</b>",
+                get_credit_status(client.creditScore),
+                "",
+                "<b>🔍 Рекомендации:</b>",
+                get_credit_advice(client.creditScore)
+            ]
 
-        await message.answer(response, parse_mode=ParseMode.HTML)
+            await message.answer(
+                "\n".join(msg),
+                parse_mode=ParseMode.HTML
+            )
+
+        except Exception as e:
+            logging.error(f"Ошибка при запросе кредитного рейтинга: {e}")
+            await message.answer(
+                "⚠️ Не удалось получить информацию. Попробуйте позже."
+            )
+
+def get_credit_status(score: int) -> str:
+    """Возвращает текстовый статус в зависимости от рейтинга"""
+    if score >= 800:
+        return "Отличный - высокий приоритет одобрения"
+    elif score >= 600:
+        return "Хороший - стандартные условия"
+    elif score >= 400:
+        return "Удовлетворительный - повышенные ставки"
+    else:
+        return "Низкий - требуется дополнительная проверка"
+
+def get_credit_advice(score: int) -> str:
+    """Генерирует рекомендации для улучшения рейтинга"""
+    advice = []
+    if score < 700:
+        advice.append("- Своевременно погашайте кредиты")
+    if score < 500:
+        advice.append("- Увеличьте частоту использования сервиса")
+    if score < 300:
+        advice.append("- Обратитесь в отделение для консультации")
+
+    return "\n".join(advice) if advice else "Ваш рейтинг оптимальный!"
 
 @router.message(Command("update_contact"))
 async def start_contact_update(message: types.Message):
     """Обновление контактных данных"""
     buttons = [
-        [types.KeyboardButton(text="📱 Изменить телефон")],
+        [types.KeyboardButton(text="📱 Изменить телефон", )],
         [types.KeyboardButton(text="📧 Изменить email")],
         [types.KeyboardButton(text="❌ Отмена")]
     ]
@@ -123,6 +165,47 @@ async def start_contact_update(message: types.Message):
         "Какие данные вы хотите обновить?",
         reply_markup=keyboard
     )
+
+@router.message(F.text == "📱 Изменить телефон")
+async def start_phone_update(message: Message, state: FSMContext):
+    """Запуск процесса изменения телефона"""
+    await message.answer(
+        "Введите новый номер телефона в формате +7XXXYYYYYYY:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(FormStates.waiting_for_phone)
+
+@router.message(FormStates.waiting_for_phone)
+async def process_new_phone(message: Message, state: FSMContext):
+    """Обработка нового номера телефона"""
+    try:
+        # Валидация номера
+        phone = validate_phone_number(message.text)
+
+        async with async_session() as session:
+            # Обновляем номер в БД
+            client = await session.execute(
+                select(Client)
+                .where(Client.telegram_id == message.from_user.id)
+            )
+            client = client.scalar()
+
+            if not client:
+                await message.answer("❌ Профиль не найден")
+                return
+
+            client.phone_numbers = [phone]
+            await session.commit()
+
+        await message.answer("✅ Номер телефона успешно обновлен!")
+        await state.clear()
+
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка: {e}\nПопробуйте еще раз:")
+    except Exception as e:
+        logging.error(f"Phone update error: {e}")
+        await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
+        await state.clear()
 
 @router.message(F.text, lambda msg: msg.from_user.id in temp_storage and not temp_storage[msg.from_user.id].fullName)
 async def process_full_name(message: types.Message):
