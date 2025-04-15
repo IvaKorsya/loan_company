@@ -25,13 +25,13 @@ class Client(Base):
     ------------------------------------------------------------------------------
     email               Контактный email (зашифровано)              STR(100), UQ0
     ------------------------------------------------------------------------------
-    registration_date   Дата регистрации клиента                    DTime
+    registration_date   Дата регистрации клиента                    DATE
     ------------------------------------------------------------------------------
     creditScore         Кредитный рейтинг (0-1000)                  INT
     ------------------------------------------------------------------------------
 
     ОТНОШЕНИЯ
-    Loan            inf ---- inf    Clients
+    Loan            inf ---- 1    Clients
     CreditHistory   inf ---- inf    Clients
     """
     __tablename__ = "clients"
@@ -115,7 +115,33 @@ class Client(Base):
 
 
 class Loan(Base):
-    """Модель кредита клиента"""
+    """Модель кредита клиента
+    Основные поля:
+    ------------------------------------------------------------------------------
+    loan_id             Уникальный идентификатор кредита    INT, PK, AInc
+    ------------------------------------------------------------------------------
+    client_id           Ссылка на клиента                   INT, FK
+    ------------------------------------------------------------------------------
+    loan_type_id        Ссылка на тип кредита               INT, FK
+    ------------------------------------------------------------------------------
+    issue_date          Дата выдачи кредита                 DATE
+    ------------------------------------------------------------------------------
+    amount              Сумма кредита                       NUM(15,2)
+    ------------------------------------------------------------------------------
+    term                Срок кредита (в месяцах)            INT
+    ------------------------------------------------------------------------------
+    status              Статус кредита                      ENUM
+    ------------------------------------------------------------------------------
+    total_paid          Общая сумма выплаченных средств     NUM(15,2)
+    ------------------------------------------------------------------------------
+    remaining_amount    Оставшаяся сумма к выплате          NUM(15,2)
+    ------------------------------------------------------------------------------
+
+    ОТНОШЕНИЯ
+    clients     1 ---- inf    loans
+    payments    inf ---- 1      loans
+    loan_type   1   ---- inf    loans
+    """
     __tablename__ = 'loans'
 
     loan_id = Column(Integer, primary_key=True, autoincrement=True,
@@ -155,13 +181,34 @@ class Loan(Base):
 
 
 class Payment(Base):
-    """Модель платежа по кредиту"""
+    """Модель платедей по кредиту
+    Основные поля:
+    ------------------------------------------------------------------------------
+    payment_id          Уникальный идентификатор платежа    INT, PK, AInc
+    ------------------------------------------------------------------------------
+    loan_id             Ссылка на кредит                    INT, FK
+    ------------------------------------------------------------------------------
+    payment_date_plan   Плановая дата внесения платежа      DATE
+    ------------------------------------------------------------------------------
+    planned_amount      Плановая сумма платежа              NUM(15,2)
+    ------------------------------------------------------------------------------
+    payment_date_fact   Фактическая дата внесения платежа   DATE
+    ------------------------------------------------------------------------------
+    actual_amount       Фактически внесенная сумма          NUM(15,2)
+    ------------------------------------------------------------------------------
+    penalty_date        Дата начисления штрафа              DATE
+    ------------------------------------------------------------------------------
+    penalty_amount      Сумма штрафа за просрочку           NUM(15,2)
+    ------------------------------------------------------------------------------
+
+    ОТНОШЕНИЯ
+    loans   1----inf    payments
+    """
     __tablename__ = 'payments'
 
     payment_id = Column(Integer, primary_key=True, autoincrement=True,
                       comment='Уникальный идентификатор платежа (PK)')
-    loan_id = Column(Integer, ForeignKey('loans.loan_id', ondelete='CASCADE'),
-                   nullable=False, index=True,
+    loan_id = Column(Integer, ForeignKey('loans.loan_id', ondelete='CASCADE'),nullable=False, index=True,
                    comment='Ссылка на кредит (FK)')
     payment_date_plan = Column(Date, nullable=False,
                              comment='Плановая дата внесения платежа')
@@ -193,32 +240,55 @@ class Payment(Base):
 
 
 class CreditHistory():
-    "Модуль работы с кредитной историей"
+    """Модель кредитной истории
+    Основные поля:
+    ------------------------------------------------------------------------------
+    LoanHistID      Уникальный внутренний ID клиента    INT, PK, AInc
+    ------------------------------------------------------------------------------
+    loanID          ID кредита                    INT, FK
+    ------------------------------------------------------------------------------
+    bankID          Название банка кредитования      DATE
+    ------------------------------------------------------------------------------
+    fullname        Полное имя клиента              NUM(15,2)
+    ------------------------------------------------------------------------------
+    passport        Паспортные данные клиента   DATE
+    ------------------------------------------------------------------------------
+    status          Статус кредита          NUM(15,2)
+    ------------------------------------------------------------------------------
+    issue_date      Дата выдачи кредита              DATE
+    ------------------------------------------------------------------------------
+    amount          Изначальная сумма кредита           NUM(15,2)
+    ------------------------------------------------------------------------------
+    term            Срок кредита в месяцах
+    ------------------------------------------------------------------------------
+    interest_rate   Процентная ставка (годовых)           NUM(15,2)
+    ------------------------------------------------------------------------------
+
+    ОТНОШЕНИЯ
+    cliets   1----inf    credit_history
+    """
 
     __tablename__ = "credit_history"
-    LoanHistID: Mapped[int] = mapped_column(Integer,primary_key=True,autoincrement=True,
+    LoanHistID      = Column(Integer,primary_key=True,autoincrement=True,
         comment="Уникальный внутренний ID клиента")
-    loanID: Mapped[int] = mapped_column(Integer,
+    loanID          = Column(Integer,
         comment="ID кредита (общие-организационный)")
-    bankID: Mapped[int] = mapped_column(Integer, ForeignKey('bank_name.bankID'),
+    bankID          = Column(Integer, ForeignKey('bank_name.bankID'),
         comment='Название банка кредитования')
-    fullname: Mapped[str] = mapped_column(String(100), nullable=False,
+    fullname        = Column(String(100), nullable=False,
         comment="Полное имя клиента")
-    passport: Mapped[int] = mapped_column(Integer, nullable=False,
+    passport        = Column(Integer, nullable=False,
         comment="Паспортные данные клиента")
-    status: Mapped[Enum] = mapped_column(Enum(LoanStatus),nullable=False, default=LoanStatus.UNKNOW,
+    status          = Column(Enum(LoanStatus),nullable=False, default=LoanStatus.UNKNOW,
         comment="Статус кредита")
-    issue_date:Mapped[datetime] = mapped_column(Date, nullable=False,
+    issue_date      = Column(Date, nullable=False,
         comment='Дата выдачи кредита')
-    amount = Column(Numeric(15, 2), nullable=False,
+    amount          = Column(Numeric(15, 2), nullable=False,
         comment='Изначальная сумма кредита')
-    term = Column(Integer, nullable=False,
+    term            = Column(Integer, nullable=False,
         comment='Срок кредита в месяцах')
-    interest_rate = Column(Numeric(5, 2), nullable=False,
+    interest_rate   = Column(Numeric(5, 2), nullable=False,
         comment='Процентная ставка (годовых)')
-
-    status = Column(Enum(LoanStatus), default=LoanStatus.UNKNOW,
-        comment='Текущий статус кредита')
 
     # Связь с клиентом (только для наших клиентов)
     client = relationship("Client", back_populates="credit_history")
