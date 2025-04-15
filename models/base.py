@@ -18,6 +18,12 @@ class LoanStatus(PyEnum):
     ACTIVE = 'активен'
     CLOSED = 'закрыт'
 
+class CreditHistoryStatus(PyEnum):
+    ACTIVE = 'открыт'
+    CLOSE = 'закрыт'
+    OVERDUE = 'просрочен'
+    UNKNOW = 'неизвестно'
+
 class Base(AsyncAttrs, DeclarativeBase):
     """Базовая модель с поддержкой async"""
     pass
@@ -35,3 +41,10 @@ class LoanType(Base):
 
     def __repr__(self):
         return f"<LoanType {self.type_id}: {self.name}>"
+
+class BankName(Base):
+    """Модель банка кредитования"""
+    __tablename__ = 'bank_name'
+
+    bankID = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)

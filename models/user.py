@@ -28,17 +28,13 @@ class Client(Base):
 
     # Основные поля
     clientID: Mapped[int] = mapped_column(Integer,primary_key=True,autoincrement=True,
-        comment="Уникальный внутренний ID клиента"
-    )
+        comment="Уникальный внутренний ID клиента")
     fullName: Mapped[str] = mapped_column(String(100),nullable=False,
-        comment="Полное имя (фамилия, имя, отчество)"
-    )
+        comment="Полное имя (фамилия, имя, отчество)")
     passport: Mapped[str] = mapped_column(String(20),unique=True,nullable=False,
-        comment="Серия и номер паспорта (зашифровано)"
-    )
+        comment="Серия и номер паспорта (зашифровано)" )
     telegram_id: Mapped[int] = mapped_column(BigInteger,unique=True,nullable=True,
-        comment="ID Telegram для уведомлений"
-    )
+        comment="ID Telegram для уведомлений")
     phone_numbers: Mapped[list[str]] = mapped_column(JSON,nullable=False,
         comment="Список телефонов в международном формате"
     )
@@ -150,26 +146,19 @@ class Payment(Base):
 
     payment_id = Column(Integer, primary_key=True, autoincrement=True,
                       comment='Уникальный идентификатор платежа (PK)')
-
     loan_id = Column(Integer, ForeignKey('loans.loan_id', ondelete='CASCADE'),
                    nullable=False, index=True,
                    comment='Ссылка на кредит (FK)')
-
     payment_date_plan = Column(Date, nullable=False,
                              comment='Плановая дата внесения платежа')
-
     planned_amount = Column(Numeric(15, 2), nullable=False,
                           comment='Плановая сумма платежа')
-
     payment_date_fact = Column(Date,
                              comment='Фактическая дата внесения платежа (NULL если не оплачен)')
-
     actual_amount = Column(Numeric(15, 2), default=0.00,
                          comment='Фактически внесенная сумма')
-
     penalty_date = Column(Date,
                         comment='Дата начисления штрафа (NULL если нет штрафа)')
-
     penalty_amount = Column(Numeric(15, 2), default=0.00,
                           comment='Сумма штрафа за просрочку')
 
@@ -187,3 +176,18 @@ class Payment(Base):
             self.penalty_date = current_date
             return self.penalty_amount
         return 0.00
+
+
+class CreditHistory():
+    "Модуль работы с кредитной историей"
+
+    __tablename__ = "credit_history"
+    LoanHistID: Mapped[int] = mapped_column(Integer,primary_key=True,autoincrement=True,
+        comment="Уникальный внутренний ID клиента")
+    loanID: Mapped[int] = mapped_column(Integer,
+        comment="ID кредита (общие-организационный)")
+    #bankID: Mapped[int] = mapped_column(Integer, ForeignKey())
+    fullname: Mapped[str] = mapped_column(String(100), nullable=False,
+        comment="Полное имя клиента")
+    passport: Mapped[int] = mapped_column(Integer, nullable=False,
+        comment="Паспортные данные клиента")
