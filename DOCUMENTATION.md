@@ -66,11 +66,20 @@
 Устанавливает меню команд в зависимости от роли
 
 ### Модуль handlers.db_handlers
+#### get_credit_advice
+Генерирует рекомендации для улучшения рейтинга
+
+#### get_credit_status
+Возвращает текстовый статус в зависимости от рейтинга
+
 #### process_email
 Обработка email и финальное сохранение
 
 #### process_full_name
 Обработка ФИО
+
+#### process_new_phone
+Обработка нового номера телефона
 
 #### process_passport
 Обработка паспортных данных
@@ -121,11 +130,20 @@ Construct a new :class:`_expression.Select`.
 #### start_contact_update
 Обновление контактных данных
 
+#### start_phone_update
+Запуск процесса изменения телефона
+
 #### start_registration
 Начало процесса регистрации
 
+#### validate_phone_number
+Валидация и нормализация номера телефона
+
 #### view_credit_info
-Просмотр кредитной информации
+
+    Показывает детальную информацию о кредитном рейтинге пользователя
+    с историей изменений и рекомендациями.
+    
 
 #### view_personal_info
 Просмотр личной информации с защитой данных
@@ -151,11 +169,27 @@ Construct a new :class:`_expression.Select`.
 #### admin_panel
 Основное меню админки с обновлением команд
 
+    Ввывподит текст и клавиши:
+    --------------------------------------------------------------
+    🛠 <b>Административная панель</b>
+    --------------------------------------------------------------
+    |📊 Статистика|👥 Поиск клиента|⚙ Изменить кредитный рейтинг|
+    --------------------------------------------------------------
+        Статистика (admin_stats)
+        Поиск клиентов (admin_find_client)
+        Изменить кредитный рейтинг (admin_change_credit)
+    
+
 #### change_credit_start
 Изменение кредитного рейтинга
 
 #### find_client
 Поиск клиента по ID
+
+#### is_admin
+
+    Проверка на право администрирования.
+    
 
 #### process_client_id
 Обработка ID клиента
@@ -279,6 +313,25 @@ A type for bigger ``int`` integers.
 
 ### Client
 Модель клиента кредитной компании с защитой данных
+    Основные поля:
+    clientID            --- Integer, primary_key, autoincrement
+    fullName            --- String(100),nullable
+    passport            --- String(20), unique, nullable
+    telegram_id         --- BigInteger, unique, nullable
+    phone_numbers       --- JSON, nullable
+    email               --- String(100), unique, nullable
+    registration_date   --- DateTime
+    creditScore         --- Integer
+    
+
+### Column
+Represents a column in a database table.
+
+### CreditHistory
+Модуль работы с кредитной историей
+
+### Date
+A type for ``datetime.date()`` objects.
 
 ### DateTime
 A type for ``datetime.datetime()`` objects.
@@ -320,6 +373,122 @@ A type for ``datetime.datetime()`` objects.
         #> email='contact@mail.com'
         ```
         
+
+### Enum
+Generic Enum Type.
+
+    The :class:`.Enum` type provides a set of possible string values
+    which the column is constrained towards.
+
+    The :class:`.Enum` type will make use of the backend's native "ENUM"
+    type if one is available; otherwise, it uses a VARCHAR datatype.
+    An option also exists to automatically produce a CHECK constraint
+    when the VARCHAR (so called "non-native") variant is produced;
+    see the  :paramref:`.Enum.create_constraint` flag.
+
+    The :class:`.Enum` type also provides in-Python validation of string
+    values during both read and write operations.  When reading a value
+    from the database in a result set, the string value is always checked
+    against the list of possible values and a ``LookupError`` is raised
+    if no match is found.  When passing a value to the database as a
+    plain string within a SQL statement, if the
+    :paramref:`.Enum.validate_strings` parameter is
+    set to True, a ``LookupError`` is raised for any string value that's
+    not located in the given list of possible values; note that this
+    impacts usage of LIKE expressions with enumerated values (an unusual
+    use case).
+
+    The source of enumerated values may be a list of string values, or
+    alternatively a PEP-435-compliant enumerated class.  For the purposes
+    of the :class:`.Enum` datatype, this class need only provide a
+    ``__members__`` method.
+
+    When using an enumerated class, the enumerated objects are used
+    both for input and output, rather than strings as is the case with
+    a plain-string enumerated type::
+
+        import enum
+        from sqlalchemy import Enum
+
+
+        class MyEnum(enum.Enum):
+            one = 1
+            two = 2
+            three = 3
+
+
+        t = Table("data", MetaData(), Column("value", Enum(MyEnum)))
+
+        connection.execute(t.insert(), {"value": MyEnum.two})
+        assert connection.scalar(t.select()) is MyEnum.two
+
+    Above, the string names of each element, e.g. "one", "two", "three",
+    are persisted to the database; the values of the Python Enum, here
+    indicated as integers, are **not** used; the value of each enum can
+    therefore be any kind of Python object whether or not it is persistable.
+
+    In order to persist the values and not the names, the
+    :paramref:`.Enum.values_callable` parameter may be used.   The value of
+    this parameter is a user-supplied callable, which  is intended to be used
+    with a PEP-435-compliant enumerated class and  returns a list of string
+    values to be persisted.   For a simple enumeration that uses string values,
+    a callable such as  ``lambda x: [e.value for e in x]`` is sufficient.
+
+    .. seealso::
+
+        :ref:`orm_declarative_mapped_column_enums` - background on using
+        the :class:`_sqltypes.Enum` datatype with the ORM's
+        :ref:`ORM Annotated Declarative <orm_declarative_mapped_column>`
+        feature.
+
+        :class:`_postgresql.ENUM` - PostgreSQL-specific type,
+        which has additional functionality.
+
+        :class:`.mysql.ENUM` - MySQL-specific type
+
+    
+
+### ForeignKey
+Defines a dependency between two columns.
+
+    ``ForeignKey`` is specified as an argument to a :class:`_schema.Column`
+    object,
+    e.g.::
+
+        t = Table(
+            "remote_table",
+            metadata,
+            Column("remote_id", ForeignKey("main_table.id")),
+        )
+
+    Note that ``ForeignKey`` is only a marker object that defines
+    a dependency between two columns.   The actual constraint
+    is in all cases represented by the :class:`_schema.ForeignKeyConstraint`
+    object.   This object will be generated automatically when
+    a ``ForeignKey`` is associated with a :class:`_schema.Column` which
+    in turn is associated with a :class:`_schema.Table`.   Conversely,
+    when :class:`_schema.ForeignKeyConstraint` is applied to a
+    :class:`_schema.Table`,
+    ``ForeignKey`` markers are automatically generated to be
+    present on each associated :class:`_schema.Column`, which are also
+    associated with the constraint object.
+
+    Note that you cannot define a "composite" foreign key constraint,
+    that is a constraint between a grouping of multiple parent/child
+    columns, using ``ForeignKey`` objects.   To define this grouping,
+    the :class:`_schema.ForeignKeyConstraint` object must be used, and applied
+    to the :class:`_schema.Table`.   The associated ``ForeignKey`` objects
+    are created automatically.
+
+    The ``ForeignKey`` objects associated with an individual
+    :class:`_schema.Column`
+    object are available in the `foreign_keys` collection
+    of that column.
+
+    Further examples of foreign key configuration are in
+    :ref:`metadata_foreignkeys`.
+
+    
 
 ### Integer
 A type for ``int`` integers.
@@ -522,6 +691,9 @@ Represent a SQL JSON type.
 
     
 
+### Loan
+Модель кредита клиента
+
 ### Mapped
 Represent an ORM mapped attribute on a mapped class.
 
@@ -559,6 +731,41 @@ Represent an ORM mapped attribute on a mapped class.
 
     
 
+### Numeric
+Base for non-integer numeric types, such as
+    ``NUMERIC``, ``FLOAT``, ``DECIMAL``, and other variants.
+
+    The :class:`.Numeric` datatype when used directly will render DDL
+    corresponding to precision numerics if available, such as
+    ``NUMERIC(precision, scale)``.  The :class:`.Float` subclass will
+    attempt to render a floating-point datatype such as ``FLOAT(precision)``.
+
+    :class:`.Numeric` returns Python ``decimal.Decimal`` objects by default,
+    based on the default value of ``True`` for the
+    :paramref:`.Numeric.asdecimal` parameter.  If this parameter is set to
+    False, returned values are coerced to Python ``float`` objects.
+
+    The :class:`.Float` subtype, being more specific to floating point,
+    defaults the :paramref:`.Float.asdecimal` flag to False so that the
+    default Python datatype is ``float``.
+
+    .. note::
+
+        When using a :class:`.Numeric` datatype against a database type that
+        returns Python floating point values to the driver, the accuracy of the
+        decimal conversion indicated by :paramref:`.Numeric.asdecimal` may be
+        limited.   The behavior of specific numeric/floating point datatypes
+        is a product of the SQL datatype in use, the Python :term:`DBAPI`
+        in use, as well as strategies that may be present within
+        the SQLAlchemy dialect in use.   Users requiring specific precision/
+        scale are encouraged to experiment with the available datatypes
+        in order to determine the best results.
+
+    
+
+### Payment
+Модель платежа по кредиту
+
 ### String
 The base for all string and character types.
 
@@ -569,6 +776,9 @@ The base for all string and character types.
     on most databases.
 
     
+
+### date
+date(year, month, day) --> date object
 
 ### datetime
 datetime(year, month, day[, hour[, minute[, second[, microsecond[,tzinfo]]]]])

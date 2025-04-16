@@ -6,10 +6,7 @@ from utils.commands import set_bot_commands  # ← Импорт функции
 from utils.database import init_db
 
 async def on_startup():
-    """Действия при запуске бота"""
-    # Инициализация БД (создание таблиц)
     await init_db()
-    logging.info("✅ Таблицы в БД успешно созданы/проверены")
 
 
 async def main():
