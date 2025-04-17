@@ -62,8 +62,8 @@ class Client(Base):
     )
 
     loans = relationship("Loan", back_populates="client", cascade="all, delete-orphan")
-    credit_history = relationship("CreditHistory", back_populates="client",
-                                cascade="all, delete-orphan")
+    # credit_history = relationship("CreditHistory", back_populates="client",
+    #                             cascade="all, delete-orphan")
     # Методы валидации
     @staticmethod
     def validate_phone(phone: str) -> str:
@@ -149,7 +149,7 @@ class Loan(Base):
     client_id = Column(Integer, ForeignKey('clients.clientID', ondelete='CASCADE'),
                      nullable=False, index=True,
                      comment='Ссылка на клиента')
-    loan_type_id = Column(Integer, ForeignKey('loan_types.type_id'),
+    typeID = Column(Integer, ForeignKey('loan_types.typeID'),
                        nullable=False, index=True,
                        comment='Ссылка на тип кредита')
     issue_date = Column(DateTime, default=datetime.utcnow, nullable=False,
@@ -269,6 +269,7 @@ class CreditHistory(Base):
     """
 
     __tablename__ = "credit_history"
+
     LoanHistID      = Column(Integer,primary_key=True,autoincrement=True,
         comment="Уникальный внутренний ID клиента")
     loanID          = Column(Integer,
@@ -291,7 +292,7 @@ class CreditHistory(Base):
         comment='Процентная ставка (годовых)')
 
     # Связь с клиентом (только для наших клиентов)
-    client = relationship("Client", back_populates="credit_history")
+    # client = relationship("Client", back_populates="credit_history")
 
     def __repr__(self):
         return (f"<CreditHistory {self.history_id} (Bank: {self.bank_name}, "

@@ -44,7 +44,7 @@ class LoanType(Base):
     """
     __tablename__ = 'loan_types'
 
-    type_id = Column(Integer, primary_key=True)
+    typeID = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
     interest_rate = Column(Numeric(5, 2), nullable=False)
     min_amount = Column(Numeric(15, 2), nullable=False)
