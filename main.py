@@ -4,12 +4,12 @@ from config import Config
 from handlers import basic, db_handlers, admin
 from utils.commands import set_bot_commands  # ← Импорт функции
 from utils.database import init_db, async_session 
-from utils.data_filler import add_default_loan_type
+from utils.data_filler import add_default_loan_types
 
 async def on_startup():
     await init_db()
     async with async_session() as session:
-        await add_default_loan_type(session) 
+        await add_default_loan_types(session) 
 
 
 
