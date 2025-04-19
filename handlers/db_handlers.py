@@ -2,18 +2,20 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.types import Message, ReplyKeyboardRemove
-from services.phone_validation import validate_phone_number
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select
+from datetime import datetime, timedelta
+from decimal import Decimal
+from services.phone_validation import validate_phone_number
+from sqlalchemy import select, func, and_
 from sqlalchemy.exc import IntegrityError
-from datetime import datetime
+from sqlalchemy.orm import joinedload
 import logging
 
 from utils.database import async_session
-from models.user import Client, Loan
-from models.base import LoanType
+from models.user import Client, Loan, Payment, CreditHistory
+from models.base import LoanType, LoanStatus
 from config import Config
-from states import FormStates
+from states import FormStates, LoanStates
 
 router = Router(name="client_handlers")
 
@@ -317,6 +319,8 @@ async def show_profile(message: types.Message):
             parse_mode=ParseMode.HTML
         )
 
+#Далее кредиты и платежи
+
 @router.message(Command("my_loans"))
 async def show_client_loans(message: types.Message):
     """Показывает все кредиты клиента"""
@@ -355,4 +359,321 @@ async def show_client_loans(message: types.Message):
             "\n\n".join(response),
             parse_mode=ParseMode.HTML
         )
+
+@router.message(Command("take_loan"))
+async def start_loan_process(message: types.Message, state: FSMContext):
+    """Начало процесса оформления кредита"""
+    async with async_session() as session:
+        # Проверяем регистрацию клиента
+        client = await session.execute(
+            select(Client)
+            .where(Client.telegram_id == message.from_user.id)
+        )
+        client = client.scalar()
+
+        if not client:
+            return await message.answer("ℹ Вы не зарегистрированы. Используйте /register")
+
+        # Проверяем активные кредиты
+        active_loans = await session.execute(
+            select(func.count(Loan.loan_id))
+            .where(
+                and_(
+                    Loan.client_id == client.clientID,
+                    Loan.status == LoanStatus.ACTIVE
+                )
+            )
+        )
+        
+        if active_loans.scalar() > 0:
+            return await message.answer(
+                "❌ У вас есть непогашенные кредиты. "
+                "Новый кредит не может быть оформлен."
+            )
+
+        # Получаем доступные типы кредитов
+        loan_types = await session.execute(select(LoanType))
+        loan_types = loan_types.scalars().all()
+
+        if not loan_types:
+            return await message.answer("⚠ В настоящее время кредитные продукты недоступны")
+
+        # Создаем клавиатуру с типами кредитов
+        keyboard = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text=f"{lt.name} ({lt.interest_rate}%)")] 
+                for lt in loan_types
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+
+        await message.answer(
+            "💰 <b>Выберите тип кредита:</b>",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        await state.set_state(LoanStates.choose_loan_type)
+
+@router.message(LoanStates.choose_loan_type)
+async def process_loan_type(message: types.Message, state: FSMContext):
+    """Обработка выбора типа кредита"""
+    async with async_session() as session:
+        try:
+            # Получаем выбранный тип кредита
+            loan_type_name = message.text.split('(')[0].strip()
+            loan_type = await session.execute(
+                select(LoanType)
+                .where(LoanType.name == loan_type_name)
+            )
+            loan_type = loan_type.scalar()
+
+            if not loan_type:
+                await message.answer("❌ Неверный тип кредита. Попробуйте еще раз.")
+                return
+
+            # Сохраняем данные в состоянии
+            await state.update_data({
+                'loan_type_id': loan_type.type_id,
+                'min_amount': loan_type.min_amount,
+                'max_amount': loan_type.max_amount,
+                'min_term': loan_type.min_term,
+                'max_term': loan_type.max_term,
+                'interest_rate': loan_type.interest_rate
+            })
+            
+            # Запрашиваем сумму кредита
+            await message.answer(
+                f"💵 Введите сумму кредита (от {loan_type.min_amount} до {loan_type.max_amount} руб.):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.set_state(LoanStates.enter_amount)
+
+        except Exception as e:
+            logging.error(f"Ошибка выбора типа кредита: {e}")
+            await message.answer("⚠ Произошла ошибка. Попробуйте позже.")
+            await state.clear()
+
+@router.message(LoanStates.enter_amount)
+async def process_loan_amount(message: types.Message, state: FSMContext):
+    """Обработка суммы кредита"""
+    try:
+        data = await state.get_data()
+        amount = Decimal(message.text.replace(',', '.'))
+        
+        if amount < data['min_amount'] or amount > data['max_amount']:
+            raise ValueError(
+                f"Сумма должна быть от {data['min_amount']} до {data['max_amount']} руб."
+            )
+
+        # Рассчитываем максимально доступную сумму
+        async with async_session() as session:
+            client = await session.execute(
+                select(Client)
+                .where(Client.telegram_id == message.from_user.id)
+            )
+            client = client.scalar()
+
+            max_allowed = await calculate_max_loan_amount(client.clientID, session)
+            if amount > max_allowed:
+                raise ValueError(
+                    f"Ваш кредитный рейтинг позволяет взять максимум {max_allowed} руб."
+                )
+
+        await state.update_data({'amount': amount})
+        
+        # Запрашиваем срок кредита
+        await message.answer(
+            f"⏳ Введите срок кредита в месяцах (от {int(data['min_term'])} до {int(data['max_term'])}):"
+        )
+        await state.set_state(LoanStates.enter_term)
+
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    except Exception as e:
+        logging.error(f"Ошибка ввода суммы: {e}")
+        await message.answer("⚠ Произошла ошибка. Попробуйте позже.")
+        await state.clear()
+
+@router.message(LoanStates.enter_term)
+async def process_loan_term(message: types.Message, state: FSMContext):
+    """Обработка срока кредита"""
+    try:
+        term = int(message.text)
+        data = await state.get_data()
+        
+        if term < data['min_term'] or term > data['max_term']:
+            raise ValueError(
+                f"Срок должен быть от {data['min_term']} до {data['max_term']} месяцев"
+            )
+
+        await state.update_data({'term': term})
+        
+        # Рассчитываем примерный платеж
+        monthly_payment = calculate_monthly_payment(
+            data['amount'],
+            term,
+            data['interest_rate']
+        )
+        
+        # Показываем подтверждение
+        keyboard = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="✅ Подтвердить")],
+                [types.KeyboardButton(text="❌ Отменить")]
+            ],
+            resize_keyboard=True
+        )
+        
+        await message.answer(
+            f"📋 <b>Детали кредита:</b>\n\n"
+            f"Тип: {message.text.split('(')[0].strip()}\n"
+            f"Сумма: {data['amount']} руб.\n"
+            f"Срок: {term} мес.\n"
+            f"Процентная ставка: {data['interest_rate']}%\n"
+            f"Примерный ежемесячный платеж: ~{monthly_payment:.2f} руб.\n\n"
+            "Подтверждаете оформление кредита?",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        await state.set_state(LoanStates.confirm_loan)
+
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    except Exception as e:
+        logging.error(f"Ошибка ввода срока: {e}")
+        await message.answer("⚠ Произошла ошибка. Попробуйте позже.")
+        await state.clear()
+
+@router.message(LoanStates.confirm_loan, F.text == "✅ Подтвердить")
+async def confirm_loan(message: types.Message, state: FSMContext):
+    """Финальное подтверждение и оформление кредита"""
+    async with async_session() as session:
+        try:
+            data = await state.get_data()
+            client = await session.execute(
+                select(Client)
+                .where(Client.telegram_id == message.from_user.id)
+            )
+            client = client.scalar()
+
+            # Создаем кредит
+            new_loan = Loan(
+                client_id=client.clientID,
+                loan_type_id=data['loan_type_id'],
+                amount=data['amount'],
+                term=data['term'],
+                status=LoanStatus.ACTIVE,
+                remaining_amount=data['amount'],
+                issue_date=datetime.now()
+            )
+
+            # Генерируем график платежей
+            payments = generate_payment_schedule(
+                data['amount'],
+                data['term'],
+                data['interest_rate']
+            )
+            new_loan.payments = payments
+
+            session.add(new_loan)
+            await session.commit()
+
+            # Формируем сообщение с первыми платежами
+            payment_list = "\n".join(
+                f"{i}. {p.payment_date_plan.strftime('%d.%m.%Y')} - {p.planned_amount:.2f} руб."
+                for i, p in enumerate(payments[:3], 1)
+            )
+
+            await message.answer(
+                "✅ <b>Кредит успешно оформлен!</b>\n\n"
+                f"📋 Номер кредита: {new_loan.loan_id}\n"
+                f"💵 Сумма: {data['amount']} руб.\n"
+                f"⏳ Срок: {data['term']} мес.\n\n"
+                "<b>Ближайшие платежи:</b>\n"
+                f"{payment_list}",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode=ParseMode.HTML
+            )
+            
+            await state.clear()
+
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"Ошибка оформления кредита: {e}")
+            await message.answer(
+                "⚠ Произошла ошибка при оформлении кредита. Попробуйте позже.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.clear()
+
+@router.message(LoanStates.confirm_loan, F.text == "❌ Отменить")
+async def cancel_loan(message: types.Message, state: FSMContext):
+    """Отмена оформления кредита"""
+    await message.answer(
+        "❌ Оформление кредита отменено",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.clear()
+
+async def calculate_max_loan_amount(client_id: int, session) -> Decimal:
+    """Рассчитывает максимально доступную сумму кредита"""
+    # Здесь должна быть сложная логика расчета на основе кредитной истории
+    # Для примера используем упрощенный вариант
+    
+    # Получаем кредитную историю клиента
+    credit_history = await session.execute(
+        select(CreditHistory)
+        .where(CreditHistory.LoanHistID == client_id)
+    )
+    history = credit_history.scalars().all()
+    
+    # Расчет максимальной суммы на основе кредитного рейтинга и истории
+    client = await session.get(Client, client_id)
+    
+    if client.creditScore >= 800:
+        return Decimal('1000000')
+    elif client.creditScore >= 600:
+        return Decimal('500000')
+    elif client.creditScore >= 400:
+        return Decimal('200000')
+    else:
+        return Decimal('50000')
+
+def calculate_monthly_payment(amount: Decimal, term: int, interest_rate: float) -> Decimal:
+    """Рассчитывает примерный ежемесячный платеж"""
+    monthly_rate = interest_rate / 100 / 12
+    annuity_coeff = (monthly_rate * (1 + monthly_rate)**term) / ((1 + monthly_rate)**term - 1)
+    return amount * Decimal(annuity_coeff)
+
+def generate_payment_schedule(amount: Decimal, term: int, interest_rate: float) -> list[Payment]:
+    """
+    Генерирует график платежей по кредиту
+    :param amount: Сумма кредита
+    :param term: Срок в месяцах (целое число)
+    :param interest_rate: Годовая процентная ставка, например 12.5
+    :return: Список платежей (Payment)
+    """
+    monthly_payment = calculate_monthly_payment(amount, term, interest_rate)
+    payments = []
+    today = datetime.now().date()
+    remaining = amount
+
+    for month in range(1, term + 1):
+        payment_date = today + timedelta(days=30 * month)
+        interest = remaining * Decimal(interest_rate) / Decimal(100 * 12)
+        principal = monthly_payment - interest
+
+        payments.append(Payment(
+            payment_date_plan=payment_date,
+            planned_amount=round(monthly_payment, 2),
+        ))
+
+        remaining -= principal
+
+    # Корректировка последнего платежа (если округление что-то "съело")
+    if remaining != Decimal("0.00"):
+        payments[-1].planned_amount += round(remaining, 2)
+
+    return payments
         
