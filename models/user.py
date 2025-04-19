@@ -149,7 +149,7 @@ class Loan(Base):
     client_id = Column(Integer, ForeignKey('clients.clientID', ondelete='CASCADE'),
                      nullable=False, index=True,
                      comment='Ссылка на клиента')
-    typeID = Column(Integer, ForeignKey('loan_types.typeID'),
+    loan_type_id = Column(Integer, ForeignKey('loan_types.type_id'),
                        nullable=False, index=True,
                        comment='Ссылка на тип кредита')
     issue_date = Column(DateTime, default=datetime.utcnow, nullable=False,
