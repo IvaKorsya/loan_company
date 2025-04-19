@@ -10,7 +10,8 @@ from datetime import datetime
 import logging
 
 from utils.database import async_session
-from models.user import Client
+from models.user import Client, Loan
+from models.base import LoanType
 from config import Config
 from states import FormStates
 
@@ -315,3 +316,43 @@ async def show_profile(message: types.Message):
             f"<b>Кредитный рейтинг:</b> {safe_data.creditScore}",
             parse_mode=ParseMode.HTML
         )
+
+@router.message(Command("my_loans"))
+async def show_client_loans(message: types.Message):
+    """Показывает все кредиты клиента"""
+    async with async_session() as session:
+        client = await session.execute(
+            select(Client)
+            .where(Client.telegram_id == message.from_user.id)
+        )
+        client = client.scalar()
+
+        if not client:
+            return await message.answer("ℹ Вы не зарегистрированы. Используйте /register")
+
+        loans = await session.execute(
+            select(Loan)
+            .where(Loan.client_id == client.clientID)
+            .order_by(Loan.issue_date.desc())
+        )
+        loans = loans.scalars().all()
+
+        if not loans:
+            return await message.answer("У вас нет активных кредитов")
+            
+        response = ["📋 <b>Ваши кредиты:</b>"]
+        
+        for loan in loans:
+            status_emoji = "🟢" if loan.status == LoanStatus.ACTIVE else "🔴"
+            response.append(
+                f"{status_emoji} <b>Кредит #{loan.loan_id}</b>\n"
+                f"Сумма: {loan.amount} руб.\n"
+                f"Статус: {loan.status.value}\n"
+                f"Остаток: {loan.remaining_amount} руб."
+            )
+
+        await message.answer(
+            "\n\n".join(response),
+            parse_mode=ParseMode.HTML
+        )
+        
