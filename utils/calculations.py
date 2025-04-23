@@ -1,19 +1,14 @@
 from models.user import Client, Loan, Payment, CreditHistory
 from models.base import LoanType, LoanStatus
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import date,datetime, timedelta
+from decimal import Decimal,getcontext
 from sqlalchemy import select
+from dateutil.relativedelta import relativedelta
+from sqlalchemy.ext.asyncio import AsyncSession
+
 
 async def calculate_max_loan_amount(client_id: int, session) -> Decimal:
     """Рассчитывает максимально доступную сумму кредита"""
-    # TO DO добавить логику рассчета макс суммы
-    credit_history = await session.execute(
-        select(CreditHistory)
-        .where(CreditHistory.LoanHistID == client_id)
-    )
-    history = credit_history.scalars().all()
-    
-
     client = await session.get(Client, client_id)
     
     if client.creditScore >= 800:
@@ -26,40 +21,66 @@ async def calculate_max_loan_amount(client_id: int, session) -> Decimal:
         return Decimal('50000')
 
 def calculate_monthly_payment(amount: Decimal, term: int, interest_rate: float) -> Decimal:
-    """Рассчитывает примерный ежемесячный платеж"""
-    # TO DO добавить логику рассчета
+    """Рассчитывает ежемесячный платеж"""
+    getcontext().prec = 10
     monthly_rate = interest_rate / 100 / 12
-    annuity_coeff = (monthly_rate * (1 + monthly_rate)**term) / ((1 + monthly_rate)**term - 1)
+    annuity_coeff = ((monthly_rate * (1 + monthly_rate)**term)/((1 + monthly_rate)**term - 1))
     return amount * Decimal(annuity_coeff)
 
-
-def generate_payment_schedule(amount: Decimal, term: int, interest_rate: float) -> list[Payment]:
+async def generate_payment_schedule(
+    loan_id: int,
+    amount: Decimal,
+    term: int,
+    interest_rate: float,
+    start_date: date = date.today(),
+    session: AsyncSession = None
+) -> list[Payment]:
     """
-    Генерирует график платежей по кредиту
+    Генерирует график платежей по аннуитетному кредиту и сохраняет в БД
+    
+    :param loan_id: ID кредита
     :param amount: Сумма кредита
-    :param term: Срок в месяцах (целое число)
-    :param interest_rate: Годовая процентная ставка, например 12.5
-    :return: Список платежей (Payment)
+    :param term: Срок в месяцах
+    :param interest_rate: Годовая процентная ставка
+    :param start_date: Дата первого платежа
+    :param session: AsyncSession для работы с БД
+    :return: список объектов Payment
     """
-    # TO DO добавить логику рассчета 
+    getcontext().prec = 10
+    monthly_rate = Decimal(interest_rate) / Decimal(100) / Decimal(12)
     monthly_payment = calculate_monthly_payment(amount, term, interest_rate)
-    payments = []
-    today = datetime.now().date()
-    remaining = amount
-
+    
+    remaining_balance = amount
+    payment_date = start_date
+    
+    payments = []  # Инициализация списка для хранения платежей
+    
     for month in range(1, term + 1):
-        payment_date = today + timedelta(days=30 * month)
-        interest = remaining * Decimal(interest_rate) / Decimal(100 * 12)
-        principal = monthly_payment - interest
-
-        payments.append(Payment(
+        payment_date = payment_date + relativedelta(months=1)
+        interest_payment = remaining_balance * monthly_rate
+        principal_payment = monthly_payment - interest_payment
+        remaining_balance -= principal_payment
+        
+        # Корректировка последнего платежа
+        if month == term:
+            principal_payment += remaining_balance
+            remaining_balance = Decimal(0)
+        
+        # Создаем платеж
+        payment = Payment(
+            loan_id=loan_id,
             payment_date_plan=payment_date,
-            planned_amount=round(monthly_payment, 2),
-        ))
+            planned_amount=float(monthly_payment),
+            payment_date_fact=None,
+            actual_amount=None,
+            penalty_date=None,
+            penalty_amount=None
+        )
+        
+        # Добавляем в сессию и список
+        session.add(payment)
+        payments.append(payment)
+    
+    await session.commit()
 
-        remaining -= principal
-
-    if remaining != Decimal("0.00"):
-        payments[-1].planned_amount += round(remaining, 2)
-
-    return payments
+    return payments  # Возвращаем список платежей

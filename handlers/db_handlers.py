@@ -18,6 +18,7 @@ from config import Config
 from states import FormStates, LoanStates
 from utils.calculations import *
 from utils.auxiliary_funcs import *
+from utils.generate_files import *
 
 router = Router(name="client_handlers")
 
@@ -529,61 +530,94 @@ async def confirm_loan(message: types.Message, state: FSMContext):
     """Финальное подтверждение и оформление кредита"""
     async with async_session() as session:
         try:
+            # Получаем данные из состояния
             data = await state.get_data()
+            
+            # Получаем клиента
             client = await session.execute(
                 select(Client)
                 .where(Client.telegram_id == message.from_user.id)
             )
             client = client.scalar()
 
-            # Создаем кредит
+            if not client:
+                await message.answer("❌ Клиент не найден")
+                await state.clear()
+                return
+
+            # Создаем новый кредит
             new_loan = Loan(
                 client_id=client.clientID,
                 loan_type_id=data['loan_type_id'],
-                amount=data['amount'],
+                issue_date=datetime.utcnow(),
+                amount=Decimal(data['amount']),
                 term=data['term'],
                 status=LoanStatus.ACTIVE,
-                remaining_amount=data['amount'],
-                issue_date=datetime.now()
+                total_paid=Decimal('0.00'),
+                remaining_amount=Decimal(data['amount'])
             )
-
+            
+            session.add(new_loan)
+            await session.flush()  # Получаем loan_id
+            
             # Генерируем график платежей
-            payments = generate_payment_schedule(
-                data['amount'],
+            
+            payments = await generate_payment_schedule(
+                loan_id=new_loan.loan_id,
+                amount=Decimal(data['amount']),
+                term=data['term'],
+                interest_rate=data['interest_rate'],
+                start_date=datetime.utcnow().date(),
+                session=session
+            )   
+            
+            # Добавляем платежи в сессию
+            if payments:
+                for payment in payments:
+                    session.add(payment)
+            else:
+                logging.error("Нет платежей для обработки")
+            
+            # Обновляем кредитный рейтинг клиента
+            client.creditScore = min(1000, client.creditScore + 10)  # Небольшой бонус за взятие кредита
+            
+            await session.commit()
+            
+            # Рассчитываем точный ежемесячный платеж
+            monthly_payment = calculate_monthly_payment(
+                Decimal(data['amount']),
                 data['term'],
                 data['interest_rate']
             )
-            new_loan.payments = payments
+            
+            # Создаем CSV файл с графиком платежей
+            csv_file = generate_payments_csv(payments, new_loan.loan_id)
 
-            session.add(new_loan)
-            await session.commit()
-
-            # Формируем сообщение с первыми платежами
-            payment_list = "\n".join(
-                f"{i}. {p.payment_date_plan.strftime('%d.%m.%Y')} - {p.planned_amount:.2f} руб."
-                for i, p in enumerate(payments[:3], 1)
-            )
-
+            
+            # Отправляем сообщение с деталями кредита
             await message.answer(
                 "✅ <b>Кредит успешно оформлен!</b>\n\n"
-                f"📋 Номер кредита: {new_loan.loan_id}\n"
-                f"💵 Сумма: {data['amount']} руб.\n"
-                f"⏳ Срок: {data['term']} мес.\n\n"
-                "<b>Ближайшие платежи:</b>\n"
-                f"{payment_list}",
+                f"🔹 Номер кредита: #{new_loan.loan_id}\n"
+                f"🔹 Сумма: {data['amount']} руб.\n"
+                f"🔹 Срок: {data['term']} мес.\n"
+                f"🔹 Процентная ставка: {data['interest_rate']}%\n"
+                f"🔹 Ежемесячный платеж: {monthly_payment:.2f} руб.\n\n"
+                "В прикрепленном файле график платежей:",
                 reply_markup=ReplyKeyboardRemove(),
                 parse_mode=ParseMode.HTML
             )
             
-            await state.clear()
-
+            # Отправляем файл пользователю
+            await message.answer_document(csv_file)
+            
         except Exception as e:
             await session.rollback()
-            logging.error(f"Ошибка оформления кредита: {e}")
+            logging.error(f"Ошибка оформления кредита: {e}", exc_info=True)
             await message.answer(
                 "⚠ Произошла ошибка при оформлении кредита. Попробуйте позже.",
                 reply_markup=ReplyKeyboardRemove()
             )
+        finally:
             await state.clear()
 
 @router.message(LoanStates.confirm_loan, F.text == "❌ Отменить")
