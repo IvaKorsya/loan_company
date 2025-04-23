@@ -13,7 +13,7 @@ class Config:
     DEFAULT_BOT_PROPERTIES = DefaultBotProperties(parse_mode=ParseMode.HTML)  # Разметка сообщений
 
     # ID-админов и пароль в админку
-    ADMINS = [1355436790, 944438704]  # Telegram ID админов
+    ADMINS = [1355436790, 944438704, 746585762]  # Telegram ID админов
     ADMIN_PASSWORD = "i_love_db"
 
     # Настройки PostgreSQL
