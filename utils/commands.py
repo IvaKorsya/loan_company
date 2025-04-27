@@ -14,7 +14,8 @@ async def set_bot_commands(bot, user_id=None):  # Переименовали ф�
         BotCommand(command="cancel", description="Отмена"),
         BotCommand(command="payments_plan", description="План платежей"),
         BotCommand(command="check_credit", description="Выдача разрешения на кредит"),
-        BotCommand(command="early_repayment", description="Досрочное погашение")
+        BotCommand(command="early_repayment", description="Досрочное погашение"),
+        BotCommand(command="calculate_penny", description="Учет пени")
     ]
 
     if user_id in Config.ADMINS:

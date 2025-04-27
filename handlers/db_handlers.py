@@ -1467,3 +1467,101 @@ async def process_early_repayment_amount(message: types.Message, state: FSMConte
         logging.error(f"Ошибка при досрочном погашении: {e}", exc_info=True)
         await message.answer("⚠ Произошла ошибка при обработке досрочного погашения. Попробуйте позже.")
         await state.clear()
+
+#ПЕРЕРАСЧЕТ С УЧЕТОМ ПЕННИ
+@router.message(Command("calculate_penny"))
+async def calculate_penny(message: types.Message):
+    try:
+        current_date = date.today()
+        penalties_applied = False
+
+        async with async_session() as session:
+            result = await session.scalars(
+                select(Loan).where(Loan.status.in_([LoanStatus.ACTIVE, LoanStatus.OVERDUE]))
+            )
+            loans = list(result)
+
+            for loan in loans:
+                loan_overdue = False
+                total_penalty = Decimal('0.00')
+
+                payments = await session.scalars(
+                    select(Payment)
+                    .where(Payment.loan_id == loan.loan_id)
+                    .order_by(Payment.payment_date_plan)
+                )
+                payments_list = list(payments)
+
+                for payment in payments_list:
+                    if not payment.payment_date_fact and payment.payment_date_plan < current_date:
+                        # Платеж просрочен
+                        overdue_days = (current_date - payment.payment_date_plan).days
+                        penalty = (Decimal(payment.planned_amount) * Decimal('0.01') * overdue_days).quantize(Decimal('0.01'))
+
+                        payment.penalty_amount = float(penalty)
+                        payment.penalty_date = current_date
+
+                        loan_overdue = True
+                        penalties_applied = True
+                        total_penalty += penalty
+
+                if loan_overdue:
+                    loan.status = LoanStatus.OVERDUE
+
+                    # Прибавляем всю пеню к остатку долга
+                    loan.remaining_amount += total_penalty
+
+                    # Теперь пересчитаем суммы оставшихся платежей
+                    unpaid_payments = [p for p in payments_list if not p.payment_date_fact]
+
+                    if not unpaid_payments:
+                        continue
+
+                    new_monthly_payment = (Decimal(loan.remaining_amount) / len(unpaid_payments)).quantize(Decimal('0.01'))
+
+                    for payment in unpaid_payments:
+                        payment.planned_amount = float(new_monthly_payment)
+
+            await session.commit()
+
+        if penalties_applied:
+            await message.answer("✅ Перерасчет оставшихся платежей с учетом пени произведен!")
+        else:
+            await message.answer("✅ Все хорошо, просрочек нет.")
+
+    except Exception as e:
+        logging.error(f"Ошибка при перерасчете пеней: {e}", exc_info=True)
+        await message.answer("⚠ Произошла ошибка при перерасчете пеней.")
+
+@router.message(Command("set_payment_late"))
+async def set_payment_late(message: types.Message):
+    try:
+        async with async_session() as session:
+            # Выбрать самый ближайший будущий неоплаченный платеж
+            payment = await session.scalar(
+                select(Payment)
+                .where(Payment.payment_date_fact.is_(None))
+                .order_by(Payment.payment_date_plan)
+                .limit(1)
+            )
+
+            if not payment:
+                await message.answer("⚠ Нет неоплаченных платежей для изменения.")
+                return
+
+            # Изменяем платеж
+            one_month_ago = date.today() - relativedelta(months=1)
+            payment.payment_date_plan = one_month_ago
+            payment.payment_date_fact = None
+            payment.actual_amount = 0.00
+            payment.penalty_date = None
+            payment.penalty_amount = 0.00
+
+            await session.commit()
+
+        await message.answer(f"✅ Платеж ID {payment.payment_id} успешно сделан просроченным на {one_month_ago}!")
+
+    except Exception as e:
+        logging.error(f"Ошибка при установке просрочки платежа: {e}", exc_info=True)
+        await message.answer("⚠ Произошла ошибка при изменении платежа.")
+
