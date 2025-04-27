@@ -40,16 +40,19 @@ class LoanType(Base):
         interest_rate   годовая процентная ставка   [INT]
         min_amount      минимальная сумма кредита   [INT]
         max_amount      макисмальная сумма кредита  [INT]
+        min_term        минимальный срок кредитования  INT]
+        max_term        макисмальный срок кредитования [INT]
         description     описание кредита            [STR[500]]
     """
     __tablename__ = 'loan_types'
 
-    #typeID = Column(Integer, primary_key=True)
     type_id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
     interest_rate = Column(Numeric(5, 2), nullable=False)
     min_amount = Column(Numeric(15, 2), nullable=False)
     max_amount = Column(Numeric(15, 2), nullable=False)
+    min_term = Column(Numeric(15), nullable=False)
+    max_term = Column(Numeric(15), nullable=False)
     description = Column(String(500))
 
     def __repr__(self):
