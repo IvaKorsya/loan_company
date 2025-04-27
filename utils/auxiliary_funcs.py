@@ -7,6 +7,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.user import Loan, Payment
 from models.base import LoanStatus
 
+
+def get_max_credit_amount(score: int) -> Decimal:
+    """Вычисление максимально возможной суммы кредита"""
+    if score >= 800:
+        return Decimal(1000000)  # Примерная сумма для отличного рейтинга
+    elif score >= 600:
+        return Decimal(500000)  # Примерная сумма для хорошего рейтинга
+    elif score >= 400:
+        return Decimal(50000)  # Примерная сумма для удовлетворительного рейтинга
+    else:
+        return Decimal(0)  # Низкий рейтинг, кредит не доступен
+
+
 def get_credit_status(score: int) -> str:
     """Возвращает текстовый статус в зависимости от рейтинга"""
     if score >= 800:

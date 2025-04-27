@@ -14,3 +14,8 @@ class PaymentStates(StatesGroup):
     choose_loan = State()      
     enter_amount = State()   
     confirm_payment = State()
+
+class EarlyRepaymentStates(StatesGroup):
+    choose_loan = State()
+    choose_type = State()
+    enter_amount = State()
