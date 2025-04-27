@@ -148,3 +148,56 @@ async def calculate_next_payment_date_after_payment(loan: Loan, session: AsyncSe
     
     # Если все платежи завершены, возвращаем None
     return None
+
+async def generate_shortened_schedule(
+    loan: Loan,
+    monthly_payment: Decimal,
+    start_date: date,
+    session: AsyncSession
+) -> list[Payment]:
+    """
+    Генерация нового графика платежей после досрочного погашения
+    с сохранением размера платежа и сокращением срока кредита.
+    
+    :param loan: Объект кредита
+    :param monthly_payment: Размер ежемесячного платежа
+    :param start_date: Дата начала новых платежей
+    :param session: Сессия БД
+    :return: Список новых платежей
+    """
+    getcontext().prec = 10
+    monthly_rate = Decimal(loan.loan_type.interest_rate) / Decimal(100) / Decimal(12)
+    
+    payments = []
+    remaining_balance = loan.remaining_amount
+    payment_date = start_date + relativedelta(months=1)
+
+    while remaining_balance > 0:
+        interest_payment = remaining_balance * monthly_rate
+        principal_payment = monthly_payment - interest_payment
+
+        if principal_payment <= 0:
+            raise ValueError("Размер ежемесячного платежа слишком мал для погашения кредита.")
+
+        if principal_payment >= remaining_balance:
+            principal_payment = remaining_balance
+            monthly_total_payment = principal_payment + interest_payment
+        else:
+            monthly_total_payment = monthly_payment
+
+        payment = Payment(
+            loan_id=loan.loan_id,
+            payment_date_plan=payment_date,
+            planned_amount=float(monthly_total_payment),
+            payment_date_fact=None,
+            actual_amount=None
+        )
+        payments.append(payment)
+
+        remaining_balance -= principal_payment
+        payment_date += relativedelta(months=1)
+
+    session.add_all(payments)
+    await session.flush()  # Только фиксируем в сессии, коммит позже с другими изменениями
+
+    return payments
