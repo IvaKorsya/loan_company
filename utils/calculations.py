@@ -134,26 +134,17 @@ async def calculate_next_payment_details(loan: Loan, session: AsyncSession) -> t
 
 async def calculate_next_payment_date_after_payment(loan: Loan, session: AsyncSession) -> date:
     """Рассчитывает дату следующего платежа после текущего платежа"""
-    # Получаем последний совершенный платеж
-    last_payment = await session.scalar(
+    # Находим следующий незавершенный платеж по графику
+    next_payment = await session.scalar(
         select(Payment)
         .where(Payment.loan_id == loan.loan_id)
-        .where(Payment.actual_amount.is_not(None))
-        .order_by(Payment.payment_date_fact.desc())
+        .where(Payment.actual_amount.is_(None))  # Только незавершенные платежи
+        .order_by(Payment.payment_date_plan.asc())
+        .limit(1)
     )
     
-    if last_payment and last_payment.payment_date_plan:
-        # Если платеж был по графику, берем следующий месяц
-        return last_payment.payment_date_plan + relativedelta(months=1)
+    if next_payment:
+        return next_payment.payment_date_plan
     
-    # Если нет данных, рассчитываем от даты выдачи
-    if loan.issue_date:
-        payments_count = await session.scalar(
-            select(func.count(Payment.payment_id))
-            .where(Payment.loan_id == loan.loan_id)
-            .where(Payment.actual_amount.is_not(None))
-        )
-        return loan.issue_date + relativedelta(months=payments_count + 1)
-    
-    # Если ничего не подходит, возвращаем текущую дату + 1 месяц
-    return date.today() + relativedelta(months=1)
+    # Если все платежи завершены, возвращаем None
+    return None
