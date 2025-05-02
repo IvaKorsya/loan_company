@@ -27,7 +27,7 @@ async def cmd_start(message: types.Message, bot: Bot):
 
     await message.answer(
         f"👋 {hbold(message.from_user.full_name)}, добро пожаловать в <b>CreditBot</b>!\n"
-        "Ваш надежный помощник в кредитовании.",
+        "Ваш надежный помощник в кредитовании. Введите /register для регистрации.",
         parse_mode=ParseMode.HTML
     )
 

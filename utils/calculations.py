@@ -32,41 +32,54 @@ async def generate_payment_schedule(
     amount: Decimal,
     term: int,
     interest_rate: float,
-    start_date: date = date.today(),
+    start_date: date = None,
     session: AsyncSession = None
 ) -> list[Payment]:
     """
-    Генерирует график платежей по аннуитетному кредиту и сохраняет в БД
-    
+    Генерация графика платежей по аннуитетному кредиту с корректной начальной датой.
+
     :param loan_id: ID кредита
     :param amount: Сумма кредита
     :param term: Срок в месяцах
     :param interest_rate: Годовая процентная ставка
-    :param start_date: Дата первого платежа
-    :param session: AsyncSession для работы с БД
-    :return: список объектов Payment
+    :param start_date: (опционально) дата начала нового графика
+    :param session: сессия БД
+    :return: список новых платежей
     """
     getcontext().prec = 10
     monthly_rate = Decimal(interest_rate) / Decimal(100) / Decimal(12)
     monthly_payment = calculate_monthly_payment(amount, term, interest_rate)
-    
+
+    # Определим start_date: от последнего платежа или сегодняшнего дня
+    if not start_date:
+        # Ищем последний плановый платеж
+        last_payment = await session.scalar(
+            select(Payment)
+            .where(Payment.loan_id == loan_id)
+            .order_by(Payment.payment_date_plan.desc())
+            .limit(1)
+        )
+        if last_payment:
+            start_date = last_payment.payment_date_plan
+        else:
+            # Фолбэк — сегодня
+            start_date = date.today()
+
+    # Начнём с даты следующего месяца после start_date
+    payment_date = start_date + relativedelta(months=1)
     remaining_balance = amount
-    payment_date = start_date
-    
-    payments = []  # Инициализация списка для хранения платежей
-    
+    payments = []
+
     for month in range(1, term + 1):
-        payment_date = payment_date + relativedelta(months=1)
         interest_payment = remaining_balance * monthly_rate
         principal_payment = monthly_payment - interest_payment
         remaining_balance -= principal_payment
-        
+
         # Корректировка последнего платежа
         if month == term:
             principal_payment += remaining_balance
             remaining_balance = Decimal(0)
-        
-        # Создаем платеж
+
         payment = Payment(
             loan_id=loan_id,
             payment_date_plan=payment_date,
@@ -76,14 +89,15 @@ async def generate_payment_schedule(
             penalty_date=None,
             penalty_amount=None
         )
-        
-        # Добавляем в сессию и список
-        session.add(payment)
-        payments.append(payment)
-    
-    await session.commit()
 
-    return payments  # Возвращаем список платежей 
+        payments.append(payment)
+        session.add(payment)
+
+        # Следующая дата
+        payment_date += relativedelta(months=1)
+
+    await session.commit()
+    return payments
 
 async def calculate_next_payment_details(loan: Loan, session: AsyncSession) -> tuple[date, Decimal]:
     """Рассчитывает дату и сумму следующего платежа"""
