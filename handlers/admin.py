@@ -2,32 +2,47 @@ from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, update, func
-from sqlalchemy.exc import IntegrityError
-from datetime import datetime, timedelta
-import logging
-from decimal import Decimal
-import math
-
-from utils.database import async_session
-from models.user import Client, Loan
-from models.base import LoanStatus, LoanType
-from config import Config
+from aiogram.fsm.context import FSMContext  # Добавлен импорт для FSMContext
+from sqlalchemy import select, update, func, and_
+from sqlalchemy.orm import joinedload
 from utils.commands import set_bot_commands
+from utils.database import async_session
+from models import Client, Loan, Payment, LoanType, LoanStatus
+from config import Config
+from datetime import datetime, date
+from decimal import Decimal
+from utils.calculations import calculate_monthly_payment, calculate_max_loan_amount
+from utils.generate_files import generate_payments_csv
+import logging
 
 router = Router(name="admin_handlers")
 
+# Проверка админских прав
 async def is_admin(user_id: int) -> bool:
     """
-    Проверяет, является ли пользователь администратором.
-
-    Args:
-        user_id (int): Telegram ID пользователя.
-
-    Returns:
-        bool: True, если пользователь в списке администраторов, иначе False.
+    Проверка на право администрирования.
     """
     return user_id in Config.ADMINS
+
+# Постоянная навигационная клавиатура
+def get_admin_nav_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+        types.InlineKeyboardButton(text="👥 Поиск клиента", callback_data="admin_find_client")
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="⚙ Изменить рейтинг", callback_data="admin_change_credit"),
+        types.InlineKeyboardButton(text="💳 Выдать кредит", callback_data="admin_issue_loan")
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="💸 Принять платеж", callback_data="admin_make_payment"),
+        types.InlineKeyboardButton(text="🔄 Досрочное погашение", callback_data="admin_early_repayment")
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="📈 Отчёты", callback_data="admin_reports")
+    )
+    return builder.as_markup()
 
 # ---- Админские команды ----
 
@@ -35,16 +50,7 @@ async def is_admin(user_id: int) -> bool:
 async def admin_auth(message: types.Message):
     """
     Аутентификация администратора.
-
-    Проверяет, имеет ли пользователь права администратора. Если да, запрашивает пароль для входа в админ-панель.
-
-    Args:
-        message (types.Message): Сообщение от пользователя.
-
-    Example:
-        User: /admin
-        Bot: 🔐 Панель администратора
-             Введите пароль для доступа:
+    Запрашивает пароль, если пользователь в списке админов.
     """
     if not await is_admin(message.from_user.id):
         return await message.answer("❌ Доступ запрещен")
@@ -59,42 +65,17 @@ async def admin_auth(message: types.Message):
 @router.message(F.text == Config.ADMIN_PASSWORD)
 async def admin_panel(message: types.Message, bot: Bot):
     """
-    Основное меню админ-панели.
-
-    Отображает доступные действия администратора через инлайн-кнопки. Обновляет меню команд для администратора.
-
-    Args:
-        message (types.Message): Сообщение с паролем.
-        bot (Bot): Экземпляр бота для установки команд.
-
-    Example:
-        User: i_love_db
-        Bot: 🛠 Административная панель
-             [📊 Статистика] [👥 Поиск клиента]
-             [⚙ Изменить кредитный рейтинг] [💰 Выдать кредит]
-             [💸 Принять платеж] [🔄 Перерасчет платежей]
-             [📝 Отчеты]
+    Основное меню админки с навигационной клавиатурой.
     """
     if not await is_admin(message.from_user.id):
-        return await message.answer("❌ Доступ запрещен")
+        return
 
     await set_bot_commands(bot, message.from_user.id)
 
-    builder = InlineKeyboardBuilder()
-    builder.add(
-        types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-        types.InlineKeyboardButton(text="👥 Поиск клиента", callback_data="admin_find_client"),
-        types.InlineKeyboardButton(text="⚙ Изменить кредитный рейтинг", callback_data="admin_change_credit"),
-        types.InlineKeyboardButton(text="💰 Выдать кредит", callback_data="admin_issue_loan"),
-        types.InlineKeyboardButton(text="💸 Принять платеж", callback_data="admin_process_payment"),
-        types.InlineKeyboardButton(text="🔄 Перерасчет платежей", callback_data="admin_recalculate_payments"),
-        types.InlineKeyboardButton(text="📝 Отчеты", callback_data="admin_reports")
-    )
-    builder.adjust(2)
-
     await message.answer(
-        "🛠 <b>Административная панель</b>",
-        reply_markup=builder.as_markup(),
+        "🛠 <b>Административная панель</b>\n"
+        "Выберите действие:",
+        reply_markup=get_admin_nav_keyboard(),
         parse_mode=ParseMode.HTML
     )
 
@@ -104,63 +85,48 @@ async def admin_panel(message: types.Message, bot: Bot):
 async def show_stats(callback: types.CallbackQuery):
     """
     Показывает статистику системы.
-
-    Выводит общее количество клиентов, средний кредитный рейтинг и число администраторов.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 📈 Статистика системы
-             • Всего клиентов: 100
-             • Средний кредитный рейтинг: 650.0
-             • Администраторов: 2
     """
     async with async_session() as session:
-        clients_count = await session.scalar(select(func.count()).select_from(Client))
+        clients_count = await session.scalar(select(func.count(Client.clientID)))
         avg_score = await session.scalar(select(func.avg(Client.creditScore)))
+        total_loans = await session.scalar(select(func.count(Loan.loan_id)))
+        active_loans = await session.scalar(
+            select(func.count(Loan.loan_id))
+            .where(Loan.status.in_([LoanStatus.ACTIVE, LoanStatus.OVERDUE]))
+        )
 
     await callback.message.edit_text(
         f"📈 <b>Статистика системы</b>\n\n"
         f"• Всего клиентов: <b>{clients_count}</b>\n"
         f"• Средний кредитный рейтинг: <b>{avg_score:.1f}</b>\n"
+        f"• Всего кредитов: <b>{total_loans}</b>\n"
+        f"• Активных/просроченных кредитов: <b>{active_loans}</b>\n"
         f"• Администраторов: <b>{len(Config.ADMINS)}</b>",
+        reply_markup=get_admin_nav_keyboard(),
         parse_mode=ParseMode.HTML
     )
+    await callback.answer()
 
 @router.callback_query(F.data == "admin_find_client")
 async def find_client(callback: types.CallbackQuery):
     """
-    Запрашивает ID клиента для поиска.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 🔍 Введите ID клиента:
+    Поиск клиента по ID.
     """
-    await callback.message.answer(
+    await callback.message.edit_text(
         "🔍 Введите ID клиента:",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.message.answer(
+        "Введите ID клиента:",
         reply_markup=types.ForceReply(selective=True)
     )
+    await callback.answer()
 
-@router.message(F.reply_to_message & F.reply_to_message.text == "🔍 Введите ID клиента:")
+@router.message(F.reply_to_message & F.reply_to_message.text == "Введите ID клиента:")
 async def process_client_id(message: types.Message):
     """
-    Обрабатывает ID клиента и показывает информацию.
-
-    Показывает данные клиента: ID, ФИО, телефон и кредитный рейтинг.
-
-    Args:
-        message (types.Message): Сообщение с ID клиента.
-
-    Example:
-        User: 42
-        Bot: 👤 Данные клиента
-             • ID: 42
-             • ФИО: Иванов Иван Иванович
-             • Телефон: +79161234567
-             • Кредитный рейтинг: 750
+    Обработка ID клиента и вывод информации.
     """
     if not message.text.isdigit():
         return await message.answer("❌ ID должен быть числом")
@@ -176,42 +142,33 @@ async def process_client_id(message: types.Message):
         f"• ID: <b>{client.clientID}</b>\n"
         f"• ФИО: <b>{client.fullName}</b>\n"
         f"• Телефон: <b>{client.phone_numbers[0] if client.phone_numbers else 'Нет'}</b>\n"
+        f"• Email: <b>{client.email if client.email else 'Нет'}</b>\n"
         f"• Кредитный рейтинг: <b>{client.creditScore}</b>",
+        reply_markup=get_admin_nav_keyboard(),
         parse_mode=ParseMode.HTML
     )
 
 @router.callback_query(F.data == "admin_change_credit")
 async def change_credit_start(callback: types.CallbackQuery):
     """
-    Запрашивает данные для изменения кредитного рейтинга.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: ✏ Введите ID клиента и новый рейтинг через пробел:
-             Пример: 42 750
+    Изменение кредитного рейтинга.
     """
-    await callback.message.answer(
+    await callback.message.edit_text(
         "✏ Введите ID клиента и новый рейтинг через пробел:\n"
         "<i>Пример: 42 750</i>",
-        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.message.answer(
+        "Введите ID клиента и новый рейтинг:",
         reply_markup=types.ForceReply(selective=True)
     )
+    await callback.answer()
 
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("✏ Введите ID клиента"))
+@router.message(F.reply_to_message & F.reply_to_message.text.startswith("Введите ID клиента и новый рейтинг:"))
 async def process_credit_change(message: types.Message):
     """
-    Обрабатывает изменение кредитного рейтинга.
-
-    Проверяет корректность ввода и обновляет рейтинг клиента в базе данных.
-
-    Args:
-        message (types.Message): Сообщение с ID клиента и новым рейтингом.
-
-    Example:
-        User: 42 750
-        Bot: ✅ Кредитный рейтинг клиента 42 изменен на 750
+    Обработка изменения кредитного рейтинга.
     """
     try:
         client_id, new_score = message.text.split()
@@ -219,14 +176,14 @@ async def process_credit_change(message: types.Message):
 
         if not 0 <= new_score <= 1000:
             raise ValueError("Рейтинг должен быть от 0 до 1000")
-    except ValueError as e:
-        return await message.answer(f"❌ Неверный формат или значение: {str(e)}. Пример: <code>42 750</code>", parse_mode=ParseMode.HTML)
+    except:
+        return await message.answer("❌ Неверный формат. Пример: <code>42 750</code>", parse_mode=ParseMode.HTML)
 
     async with async_session() as session:
         client = await session.get(Client, int(client_id))
         if not client:
             return await message.answer("❌ Клиент не найден")
-        
+
         await session.execute(
             update(Client)
             .where(Client.clientID == int(client_id))
@@ -234,606 +191,913 @@ async def process_credit_change(message: types.Message):
         )
         await session.commit()
 
-    await message.answer(f"✅ Кредитный рейтинг клиента {client_id} изменен на {new_score}")
+    await message.answer(
+        f"✅ Кредитный рейтинг клиента {client_id} изменен на {new_score}",
+        reply_markup=get_admin_nav_keyboard()
+    )
 
 @router.callback_query(F.data == "admin_issue_loan")
 async def issue_loan_start(callback: types.CallbackQuery):
     """
-    Запрашивает данные для выдачи кредита.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 💰 Введите ID клиента, сумму кредита, срок (в месяцах) и тип кредита через пробел:
-             Пример: 42 500000 12 CONSUMER
+    Начало процесса выдачи кредита.
     """
+    await callback.message.edit_text(
+        "💳 Введите ID клиента для проверки возможности выдачи кредита:",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
     await callback.message.answer(
-        "💰 Введите ID клиента, сумму кредита, срок (в месяцах) и тип кредита через пробел:\n"
-        "<i>Пример: 42 500000 12 CONSUMER</i>",
-        parse_mode=ParseMode.HTML,
+        "Введите ID клиента:",
         reply_markup=types.ForceReply(selective=True)
     )
+    await callback.answer()
 
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("💰 Введите ID клиента"))
-async def process_issue_loan(message: types.Message):
+@router.message(F.reply_to_message & F.reply_to_message.text == "Введите ID клиента:")
+async def check_loan_eligibility(message: types.Message, state: FSMContext):
     """
-    Обрабатывает выдачу кредита.
-
-    Проверяет клиента, наличие активных кредитов, допустимую сумму, рассчитывает аннуитетный платеж
-    и создает кредит с графиком платежей.
-
-    Args:
-        message (types.Message): Сообщение с данными кредита.
-
-    Example:
-        User: 42 500000 12 CONSUMER
-        Bot: ✅ Кредит выдан!
-             • ID клиента: 42
-             • Сумма: 500000 руб.
-             • Ежемесячный платеж: 45000.00 руб.
-             • Срок: 12 мес.
+    Проверка возможности выдачи кредита и выбор типа кредита.
     """
-    try:
-        client_id, amount, term, loan_type = message.text.split()
-        client_id = int(client_id)
-        amount = Decimal(amount)
-        term = int(term)
-        loan_type = LoanType[loan_type.upper()]
-    except (ValueError, KeyError):
-        return await message.answer("❌ Неверный формат. Пример: <code>42 500000 12 CONSUMER</code>", parse_mode=ParseMode.HTML)
+    if not message.text.isdigit():
+        return await message.answer("❌ ID должен быть числом")
 
+    client_id = int(message.text)
     async with async_session() as session:
         client = await session.get(Client, client_id)
         if not client:
             return await message.answer("❌ Клиент не найден")
 
-        active_loans = await session.execute(
-            select(Loan).where(Loan.client_id == client_id, Loan.status == LoanStatus.ACTIVE)
+        # Проверка активных или просроченных кредитов
+        active_loans = await session.scalar(
+            select(func.count(Loan.loan_id))
+            .where(
+                and_(
+                    Loan.client_id == client_id,
+                    Loan.status.in_([LoanStatus.ACTIVE, LoanStatus.OVERDUE])
+                )
+            )
         )
-        if active_loans.scalars().first():
-            return await message.answer("❌ У клиента есть непогашенный кредит")
+        if active_loans > 0:
+            return await message.answer(
+                "❌ У клиента есть непогашенные кредиты. Новый кредит не может быть оформлен.",
+                reply_markup=get_admin_nav_keyboard()
+            )
 
-        max_amount = calculate_max_loan_amount(client.creditScore)
-        if amount > max_amount:
-            return await message.answer(f"❌ Сумма превышает допустимый лимит ({max_amount} руб.)")
+        # Рассчитываем максимальную сумму кредита
+        max_amount = await calculate_max_loan_amount(client_id, session)
+        credit_score = client.creditScore
 
-        annual_rate = Decimal('0.1')
-        monthly_rate = annual_rate / 12
-        monthly_payment = calculate_annuity_payment(amount, monthly_rate, term)
-
-        loan = Loan(
-            client_id=client_id,
-            amount=amount,
-            remaining_amount=amount,
-            term=term,
-            annual_interest_rate=annual_rate,
-            monthly_payment=monthly_payment,
-            status=LoanStatus.ACTIVE,
-            issue_date=datetime.now(),
-            type=loan_type,
-            payment_schedule=generate_payment_schedule(amount, monthly_payment, term)
+        # Определяем модификатор суммы в зависимости от кредитной истории
+        overdue_loans = await session.scalar(
+            select(func.count(Payment.payment_id))
+            .where(
+                Payment.loan_id.in_(
+                    select(Loan.loan_id).where(Loan.client_id == client_id)
+                )
+            )
+            .where(Payment.payment_date_fact.is_(None))
+            .where(Payment.payment_date_plan < date.today())
         )
-        session.add(loan)
-        await session.commit()
+        if overdue_loans > 0:
+            max_amount *= Decimal('0.7')  # 70% для клиентов с просрочками
+        elif credit_score > 700:
+            max_amount *= Decimal('1.2')  # 120% для хорошей кредитной истории
+        else:
+            max_amount *= Decimal('1.0')  # 100% для чистой кредитной истории
+
+        # Получаем доступные типы кредитов
+        loan_types = await session.execute(select(LoanType))
+        loan_types = loan_types.scalars().all()
+
+        if not loan_types:
+            return await message.answer(
+                "⚠ В настоящее время кредитные продукты недоступны",
+                reply_markup=get_admin_nav_keyboard()
+            )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"{lt.name} ({lt.interest_rate}%)",
+                        callback_data=f"adminLoanType_{lt.type_id}_{client_id}"
+                    )
+                ] for lt in loan_types
+            ]
+        )
 
         await message.answer(
-            f"✅ Кредит выдан!\n"
-            f"• ID клиента: {client_id}\n"
-            f"• Сумма: {amount} руб.\n"
-            f"• Ежемесячный платеж: {monthly_payment:.2f} руб.\n"
-            f"• Срок: {term} мес."
+            f"👤 Клиент: {client.fullName}\n"
+            f"📊 Кредитный рейтинг: {client.creditScore}\n"
+            f"💰 Максимальная сумма: {max_amount:.2f} руб.\n\n"
+            "Выберите тип кредита:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
         )
 
-@router.callback_query(F.data == "admin_process_payment")
-async def process_payment_start(callback: types.CallbackQuery):
+@router.callback_query(F.data.startswith("adminLoanType_"))
+async def process_loan_type(callback: types.CallbackQuery, state: FSMContext):
     """
-    Запрашивает данные для обработки платежа.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 💸 Введите ID кредита и сумму платежа через пробел:
-             Пример: 123 50000
-    """
-    await callback.message.answer(
-        "💸 Введите ID кредита и сумму платежа через пробел:\n"
-        "<i>Пример: 123 50000</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=types.ForceReply(selective=True)
-    )
-
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("💸 Введите ID кредита"))
-async def process_payment(message: types.Message):
-    """
-    Обрабатывает платеж по кредиту.
-
-    Учитывает пени за просрочки, обновляет остаток и график платежей. Поддерживает досрочное погашение.
-
-    Args:
-        message (types.Message): Сообщение с ID кредита и суммой платежа.
-
-    Example:
-        User: 123 50000
-        Bot: ✅ Платеж принят!
-             • Сумма: 50000 руб.
-             • Пени: 1000 руб.
-             • Остаток: 450000 руб.
+    Обработка выбора типа кредита и запрос суммы.
     """
     try:
-        loan_id, payment = message.text.split()
-        loan_id = int(loan_id)
-        payment = Decimal(payment)
+        _, type_id, client_id = callback.data.split("_")
+        type_id, client_id = int(type_id), int(client_id)
+
+        async with async_session() as session:
+            loan_type = await session.get(LoanType, type_id)
+            if not loan_type:
+                return await callback.message.edit_text(
+                    "❌ Тип кредита не найден",
+                    reply_markup=get_admin_nav_keyboard()
+                )
+
+            client = await session.get(Client, client_id)
+            if not client:
+                return await callback.message.edit_text(
+                    "❌ Клиент не найден",
+                    reply_markup=get_admin_nav_keyboard()
+                )
+
+            max_amount = await calculate_max_loan_amount(client_id, session)
+            overdue_loans = await session.scalar(
+                select(func.count(Payment.payment_id))
+                .where(
+                    Payment.loan_id.in_(
+                        select(Loan.loan_id).where(Loan.client_id == client_id)
+                    )
+                )
+                .where(Payment.payment_date_fact.is_(None))
+                .where(Payment.payment_date_plan < date.today())
+            )
+            if overdue_loans > 0:
+                max_amount *= Decimal('0.7')
+            elif client.creditScore > 700:
+                max_amount *= Decimal('1.2')
+
+            await state.update_data(
+                client_id=client_id,
+                loan_type_id=type_id,
+                max_amount=float(max_amount),
+                min_amount=loan_type.min_amount,
+                max_term=loan_type.max_term,
+                min_term=loan_type.min_term,
+                interest_rate=loan_type.interest_rate
+            )
+
+        await callback.message.edit_text(
+            f"💳 Тип кредита: {loan_type.name}\n"
+            f"💰 Доступная сумма: от {loan_type.min_amount} до {max_amount:.2f} руб.\n"
+            f"⏳ Срок: от {loan_type.min_term} до {loan_type.max_term} мес.\n\n"
+            "Введите сумму кредита:",
+            reply_markup=get_admin_nav_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        await callback.message.answer(
+            "Введите сумму кредита:",
+            reply_markup=types.ForceReply(selective=True)
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logging.error(f"Ошибка при выборе типа кредита: {e}")
+        await callback.message.edit_text(
+            "⚠ Ошибка при обработке запроса",
+            reply_markup=get_admin_nav_keyboard()
+        )
+        await callback.answer()
+
+@router.message(F.reply_to_message & F.reply_to_message.text == "Введите сумму кредита:")
+async def process_loan_amount(message: types.Message, state: FSMContext):
+    """
+    Обработка суммы кредита и запрос срока.
+    """
+    try:
+        amount = Decimal(message.text.replace(',', '.'))
+        data = await state.get_data()
+
+        if amount < data['min_amount'] or amount > data['max_amount']:
+            return await message.answer(
+                f"❌ Сумма должна быть от {data['min_amount']} до {data['max_amount']} руб."
+            )
+
+        await state.update_data(amount=float(amount))
+
+        await message.answer(
+            f"💵 Сумма: {amount:.2f} руб.\n"
+            f"⏳ Введите срок кредита (от {data['min_term']} до {data['max_term']} мес.):",
+            reply_markup=types.ForceReply(selective=True)
+        )
+
     except ValueError:
-        return await message.answer("❌ Неверный формат. Пример: <code>123 50000</code>", parse_mode=ParseMode.HTML)
+        await message.answer("❌ Введите корректную сумму")
+    except Exception as e:
+        logging.error(f"Ошибка ввода суммы: {e}")
+        await message.answer("⚠ Ошибка при обработке запроса")
+
+@router.message(F.reply_to_message & F.reply_to_message.text.startswith("⏳ Введите срок кредита"))
+async def process_loan_term(message: types.Message, state: FSMContext):
+    """
+    Обработка срока кредита и подтверждение.
+    """
+    try:
+        term = int(message.text)
+        data = await state.get_data()
+
+        if term < data['min_term'] or term > data['max_term']:
+            return await message.answer(
+                f"❌ Срок должен быть от {data['min_term']} до {data['max_term']} месяцев"
+            )
+
+        monthly_payment = calculate_monthly_payment(
+            Decimal(data['amount']),
+            term,
+            data['interest_rate']
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Подтвердить", callback_data="admin_confirm_loan"),
+                    InlineKeyboardButton(text="❌ Отменить", callback_data="admin_cancel_loan")
+                ]
+            ]
+        )
+
+        await message.answer(
+            f"📋 <b>Детали кредита:</b>\n\n"
+            f"• Клиент ID: {data['client_id']}\n"
+            f"• Сумма: {data['amount']:.2f} руб.\n"
+            f"• Срок: {term} мес.\n"
+            f"• Процентная ставка: {data['interest_rate']}%\n"
+            f"• Ежемесячный платеж: ~{monthly_payment:.2f} руб.\n\n"
+            "Подтвердить оформление?",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        await state.update_data(term=term)
+
+    except ValueError:
+        await message.answer("❌ Введите корректное число месяцев")
+    except Exception as e:
+        logging.error(f"Ошибка ввода срока: {e}")
+        await message.answer("⚠ Ошибка при обработке запроса")
+
+@router.callback_query(F.data == "admin_confirm_loan")
+async def confirm_loan(callback: types.CallbackQuery, state: FSMContext):
+    """
+    Подтверждение и оформление кредита.
+    """
+    async with async_session() as session:
+        try:
+            data = await state.get_data()
+            client_id = data['client_id']
+            client = await session.get(Client, client_id)
+            if not client:
+                return await callback.message.edit_text(
+                    "❌ Клиент не найден",
+                    reply_markup=get_admin_nav_keyboard()
+                )
+
+            new_loan = Loan(
+                client_id=client_id,
+                loan_type_id=data['loan_type_id'],
+                issue_date=datetime.utcnow(),
+                amount=Decimal(data['amount']),
+                term=data['term'],
+                status=LoanStatus.ACTIVE,
+                total_paid=Decimal('0.00'),
+                remaining_amount=Decimal(data['amount'])
+            )
+            session.add(new_loan)
+            await session.flush()
+
+            from db_handlers import generate_payment_schedule
+            payments = await generate_payment_schedule(
+                loan_id=new_loan.loan_id,
+                amount=Decimal(data['amount']),
+                term=data['term'],
+                interest_rate=data['interest_rate'],
+                start_date=datetime.utcnow().date(),
+                session=session
+            )
+            for payment in payments:
+                session.add(payment)
+
+            client.creditScore = min(1000, client.creditScore + 10)
+            await session.commit()
+
+            monthly_payment = calculate_monthly_payment(
+                Decimal(data['amount']),
+                data['term'],
+                data['interest_rate']
+            )
+            csv_file = generate_payments_csv(payments, new_loan.loan_id)
+
+            await callback.message.edit_text(
+                "✅ <b>Кредит успешно оформлен!</b>\n\n"
+                f"• Номер кредита: #{new_loan.loan_id}\n"
+                f"• Клиент ID: {client_id}\n"
+                f"• Сумма: {data['amount']} руб.\n"
+                f"• Срок: {data['term']} мес.\n"
+                f"• Ежемесячный платеж: {monthly_payment:.2f} руб.",
+                reply_markup=get_admin_nav_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+            await callback.message.answer_document(csv_file)
+
+        except Exception as e:
+            await session.rollback()
+            logging.error(f"Ошибка оформления кредита: {e}")
+            await callback.message.edit_text(
+                "⚠ Ошибка при оформлении кредита",
+                reply_markup=get_admin_nav_keyboard()
+            )
+        finally:
+            await state.clear()
+        await callback.answer()
+
+@router.callback_query(F.data == "admin_cancel_loan")
+async def cancel_loan(callback: types.CallbackQuery, state: FSMContext):
+    """
+    Отмена оформления кредита.
+    """
+    await callback.message.edit_text(
+        "❌ Оформление кредита отменено",
+        reply_markup=get_admin_nav_keyboard()
+    )
+    await state.clear()
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_make_payment")
+async def make_payment_start(callback: types.CallbackQuery):
+    """
+    Начало процесса приёма платежа.
+    """
+    await callback.message.edit_text(
+        "💸 Введите ID клиента и номер кредита через пробел:\n"
+        "<i>Пример: 42 123</i>",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.message.answer(
+        "Введите ID клиента и номер кредита:",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    await callback.answer()
+
+@router.message(F.reply_to_message & F.reply_to_message.text.startswith("Введите ID клиента и номер кредита:"))
+async def process_payment_info(message: types.Message, state: FSMContext):
+    """
+    Обработка ID клиента и номера кредита для платежа.
+    """
+    try:
+        client_id, loan_id = map(int, message.text.split())
+    except:
+        return await message.answer("❌ Неверный формат. Пример: <code>42 123</code>", parse_mode=ParseMode.HTML)
 
     async with async_session() as session:
         loan = await session.get(Loan, loan_id)
-        if not loan:
-            return await message.answer("❌ Кредит не найден")
+        if not loan or loan.client_id != client_id or loan.status not in [LoanStatus.ACTIVE, LoanStatus.OVERDUE]:
+            return await message.answer("❌ Кредит не найден или недоступен для платежа")
 
-        if loan.status != LoanStatus.ACTIVE:
-            return await message.answer("❌ Кредит не активен")
+        payment = await session.scalar(
+            select(Payment)
+            .where(Payment.loan_id == loan_id)
+            .where(Payment.payment_date_fact.is_(None))
+            .order_by(Payment.payment_date_plan.asc())
+        )
+        if not payment:
+            return await message.answer("❌ Нет платежей для погашения")
 
-        schedule = loan.payment_schedule
-        current_date = datetime.now()
+        penalty_amount = Decimal(str(payment.penalty_amount or 0))
+        total_due = Decimal(str(payment.planned_amount)) + penalty_amount
 
-        overdue_payments = [
-            p for p in schedule if p['date'] < current_date and not p['paid']
-        ]
-        penalty = sum(p['amount'] * Decimal('0.01') * (current_date - p['date']).days for p in overdue_payments)
-
-        total_payment = payment - penalty
-        if total_payment < 0:
-            return await message.answer(f"❌ Платеж недостаточен для покрытия пени ({penalty} руб.)")
-
-        loan.remaining_amount -= total_payment
-        for p in schedule:
-            if not p['paid'] and total_payment >= p['amount']:
-                p['paid'] = True
-                total_payment -= p['amount']
-                p['payment_date'] = current_date
-            if total_payment <= 0:
-                break
-
-        if loan.remaining_amount <= 0:
-            loan.status = LoanStatus.CLOSED
-            await session.commit()
-            await generate_no_obligations_doc(loan)
-            return await message.answer("✅ Кредит полностью погашен!")
-
-        if total_payment > 0:
-            loan.payment_schedule = recalculate_payment_schedule(loan, total_payment)
-        
-        await session.commit()
-
-        await message.answer(
-            f"✅ Платеж принят!\n"
-            f"• Сумма: {payment} руб.\n"
-            f"• Пени: {penalty} руб.\n"
-            f"• Остаток: {loan.remaining_amount} руб."
+        await state.update_data(
+            client_id=client_id,
+            loan_id=loan_id,
+            payment_id=payment.payment_id,
+            min_payment=float(total_due)
         )
 
-@router.callback_query(F.data == "admin_recalculate_payments")
-async def recalculate_payments_start(callback: types.CallbackQuery):
-    """
-    Запрашивает данные для перерасчета платежей.
+        await message.answer(
+            f"💳 Кредит #{loan_id}\n"
+            f"📅 Следующий платеж: {payment.payment_date_plan.strftime('%d.%m.%Y')}\n"
+            f"💰 Сумма: {payment.planned_amount:.2f} руб.\n"
+            f"⚠ Пени: {penalty_amount:.2f} руб.\n"
+            f"➡ Итого: {total_due:.2f} руб.\n\n"
+            "Введите сумму платежа:",
+            reply_markup=types.ForceReply(selective=True),
+            parse_mode=ParseMode.HTML
+        )
 
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 🔄 Введите ID кредита для перерасчета платежей:
+@router.message(F.reply_to_message & F.reply_to_message.text.startswith("Введите сумму платежа:"))
+async def process_payment_amount(message: types.Message, state: FSMContext):
     """
+    Обработка суммы платежа с возможностью перерасчёта.
+    """
+    try:
+        amount = Decimal(message.text)
+        data = await state.get_data()
+        min_payment = Decimal(str(data['min_payment']))
+
+        if amount < min_payment:
+            return await message.answer(
+                f"❌ Сумма меньше необходимого платежа ({min_payment:.2f} руб.)"
+            )
+
+        async with async_session() as session:
+            loan = await session.get(Loan, data['loan_id'])
+            payment = await session.get(Payment, data['payment_id'])
+
+            payment.payment_date_fact = date.today()
+            payment.actual_amount = float(amount)
+            loan.total_paid += amount
+            loan.remaining_amount -= amount
+
+            if amount > min_payment:
+                payments = await session.scalars(
+                    select(Payment)
+                    .where(Payment.loan_id == data['loan_id'])
+                    .where(Payment.payment_date_fact.is_(None))
+                    .order_by(Payment.payment_date_plan)
+                )
+                remaining_payments = list(payments)
+                if remaining_payments:
+                    remaining_term = len(remaining_payments)
+                    new_monthly_payment = (loan.remaining_amount / remaining_term).quantize(Decimal('0.01'))
+                    for p in remaining_payments:
+                        p.planned_amount = float(new_monthly_payment)
+
+            if loan.remaining_amount <= 0:
+                loan.status = LoanStatus.CLOSED
+                loan.remaining_amount = Decimal('0')
+                await session.execute(
+                    update(Payment)
+                    .where(Payment.loan_id == data['loan_id'])
+                    .where(Payment.payment_date_fact.is_(None))
+                    .values(payment_date_fact=date.today(), actual_amount=0)
+                )
+
+            next_payment = await session.scalar(
+                select(Payment)
+                .where(Payment.loan_id == data['loan_id'])
+                .where(Payment.payment_date_fact.is_(None))
+                .order_by(Payment.payment_date_plan.asc())
+            )
+            loan.next_payment_date = next_payment.payment_date_plan if next_payment else None
+
+            await session.commit()
+
+        await message.answer(
+            f"✅ Платеж на сумму {amount:.2f} руб. зачислен!\n"
+            f"💳 Остаток по кредиту #{data['loan_id']}: {loan.remaining_amount:.2f} руб.",
+            reply_markup=get_admin_nav_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        await state.clear()
+
+    except ValueError:
+        await message.answer("❌ Введите корректную сумму")
+    except Exception as e:
+        logging.error(f"Ошибка при обработке платежа: {e}")
+        await message.answer("⚠ Ошибка при обработке платежа")
+
+@router.callback_query(F.data == "admin_early_repayment")
+async def early_repayment_start(callback: types.CallbackQuery):
+    """
+    Начало процесса досрочного погашения.
+    """
+    await callback.message.edit_text(
+        "🔄 Введите ID клиента и номер кредита через пробел:\n"
+        "<i>Пример: 42 123</i>",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
     await callback.message.answer(
-        "🔄 Введите ID кредита для перерасчета платежей:",
+        "Введите ID клиента и номер кредита:",
         reply_markup=types.ForceReply(selective=True)
     )
+    await callback.answer()
 
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("🔄 Введите ID кредита"))
-async def process_recalculate_payments(message: types.Message):
+@router.message(F.reply_to_message & F.reply_to_message.text.startswith("Введите ID клиента и номер кредита:"))
+async def process_early_repayment_info(message: types.Message, state: FSMContext):
     """
-    Перерасчитывает платежи с учетом просрочек.
-
-    Учитывает пени (1% в сутки) и обновляет график платежей. Генерирует повестку в суд при ≥3 просрочках.
-
-    Args:
-        message (types.Message): Сообщение с ID кредита.
-
-    Example:
-        User: 123
-        Bot: ✅ Платежи перерасчитаны!
-             • Пени: 5000 руб.
-             • Новый остаток: 455000 руб.
+    Обработка ID клиента и номера кредита для досрочного погашения.
     """
-    if not message.text.isdigit():
-        return await message.answer("❌ ID должен быть числом")
+    try:
+        client_id, loan_id = map(int, message.text.split())
+    except:
+        return await message.answer("❌ Неверный формат. Пример: <code>42 123</code>", parse_mode=ParseMode.HTML)
 
     async with async_session() as session:
-        loan = await session.get(Loan, int(message.text))
-        if not loan:
-            return await message.answer("❌ Кредит не найден")
+        loan = await session.get(Loan, loan_id, options=[joinedload(Loan.loan_type)])
+        if not loan or loan.client_id != client_id or loan.status not in [LoanStatus.ACTIVE, LoanStatus.OVERDUE]:
+            return await message.answer("❌ Кредит не найден или недоступен")
 
-        schedule = loan.payment_schedule
-        current_date = datetime.now()
+        await state.update_data(
+            client_id=client_id,
+            loan_id=loan_id,
+            remaining_amount=float(loan.remaining_amount),
+            interest_rate=loan.loan_type.interest_rate
+        )
 
-        overdue_payments = [
-            p for p in schedule if p['date'] < current_date and not p['paid']
-        ]
-        if not overdue_payments:
-            return await message.answer("ℹ Нет просроченных платежей")
-
-        penalty = sum(p['amount'] * Decimal('0.01') * (current_date - p['date']).days for p in overdue_payments)
-        loan.remaining_amount += penalty
-
-        loan.payment_schedule = recalculate_payment_schedule(loan, Decimal('0'))
-        await session.commit()
-
-        if len(overdue_payments) >= 3:
-            await generate_court_notice(loan)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Уменьшить платежи",
+                        callback_data="admin_reduce_payment"
+                    ),
+                    InlineKeyboardButton(
+                        text="Сократить срок",
+                        callback_data="admin_reduce_term"
+                    )
+                ]
+            ]
+        )
 
         await message.answer(
-            f"✅ Платежи перерасчитаны!\n"
-            f"• Пени: {penalty} руб.\n"
-            f"• Новый остаток: {loan.remaining_amount} руб."
+            f"💳 Кредит #{loan_id}\n"
+            f"💰 Остаток: {loan.remaining_amount:.2f} руб.\n\n"
+            "Выберите тип досрочного погашения:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
         )
+
+@router.callback_query(F.data.in_(["admin_reduce_payment", "admin_reduce_term"]))
+async def process_early_repayment_type(callback: types.CallbackQuery, state: FSMContext):
+    """
+    Обработка типа досрочного погашения.
+    """
+    repayment_type = "reduce_payment" if callback.data == "admin_reduce_payment" else "reduce_term"
+    await state.update_data(repayment_type=repayment_type)
+
+    await callback.message.edit_text(
+        "💰 Введите сумму досрочного погашения:",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.message.answer(
+        "Введите сумму:",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    await callback.answer()
+
+@router.message(F.reply_to_message & F.reply_to_message.text == "Введите сумму:")
+async def process_early_repayment_amount(message: types.Message, state: FSMContext):
+    """
+    Обработка суммы досрочного погашения.
+    """
+    try:
+        amount = Decimal(message.text)
+        data = await state.get_data()
+
+        if amount <= 0:
+            return await message.answer("❌ Сумма должна быть больше нуля")
+
+        async with async_session() as session:
+            loan = await session.get(Loan, data['loan_id'], options=[joinedload(Loan.loan_type)])
+            if amount > loan.remaining_amount:
+                amount = loan.remaining_amount
+
+            early_payment = Payment(
+                loan_id=data['loan_id'],
+                payment_date_plan=date.today(),
+                planned_amount=float(amount),
+                payment_date_fact=date.today(),
+                actual_amount=float(amount),
+                is_early_payment=True
+            )
+            session.add(early_payment)
+            loan.remaining_amount -= amount
+            loan.total_paid += amount
+
+            await session.execute(
+                update(Payment)
+                .where(Payment.loan_id == data['loan_id'])
+                .where(Payment.payment_date_fact.is_(None))
+                .values(payment_date_fact=date.today(), actual_amount=0)
+            )
+
+            if loan.remaining_amount <= 0:
+                loan.status = LoanStatus.CLOSED
+                loan.next_payment_date = None
+                await session.commit()
+                await message.answer(
+                    f"✅ Кредит #{data['loan_id']} полностью погашен!\n"
+                    f"💰 Сумма: {amount:.2f} руб.",
+                    reply_markup=get_admin_nav_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
+                await state.clear()
+                return
+
+            payments = await session.scalars(
+                select(Payment)
+                .where(Payment.loan_id == data['loan_id'])
+                .where(Payment.payment_date_fact.is_(None))
+                .order_by(Payment.payment_date_plan)
+            )
+            remaining_payments = list(payments)
+            remaining_term = len(remaining_payments)
+
+            from db_handlers import generate_payment_schedule
+            if data['repayment_type'] == "reduce_payment":
+                new_payments = await generate_payment_schedule(
+                    loan_id=data['loan_id'],
+                    amount=loan.remaining_amount,
+                    term=remaining_term,
+                    interest_rate=data['interest_rate'],
+                    start_date=date.today(),
+                    session=session
+                )
+                new_monthly_payment = Decimal(str(new_payments[0].planned_amount)) if new_payments else Decimal('0')
+                response = (
+                    f"✅ Досрочное погашение на {amount:.2f} руб. зачислено!\n"
+                    f"💳 Кредит #{data['loan_id']}\n"
+                    f"💰 Остаток: {loan.remaining_amount:.2f} руб.\n"
+                    f"📅 Новый платеж: {new_monthly_payment:.2f} руб."
+                )
+            else:
+                original_term = loan.term
+                original_amount = Decimal(str(loan.amount))
+                paid_ratio = (original_amount - loan.remaining_amount) / original_amount
+                new_term = max(1, round(remaining_term * (1 - paid_ratio)))
+                new_payments = await generate_payment_schedule(
+                    loan_id=data['loan_id'],
+                    amount=loan.remaining_amount,
+                    term=new_term,
+                    interest_rate=data['interest_rate'],
+                    start_date=date.today(),
+                    session=session
+                )
+                new_monthly_payment = Decimal(str(new_payments[0].planned_amount)) if new_payments else Decimal('0')
+                response = (
+                    f"✅ Досрочное погашение на {amount:.2f} руб. зачислено!\n"
+                    f"💳 Кредит #{data['loan_id']}\n"
+                    f"💰 Остаток: {loan.remaining_amount:.2f} руб.\n"
+                    f"📅 Новый срок: {new_term} мес.\n"
+                    f"💸 Платеж: {new_monthly_payment:.2f} руб."
+                )
+
+            for p in new_payments:
+                session.add(p)
+
+            next_payment = await session.scalar(
+                select(Payment)
+                .where(Payment.loan_id == data['loan_id'])
+                .where(Payment.payment_date_fact.is_(None))
+                .order_by(Payment.payment_date_plan.asc())
+            )
+            loan.next_payment_date = next_payment.payment_date_plan if next_payment else None
+
+            await session.commit()
+
+        await message.answer(
+            response,
+            reply_markup=get_admin_nav_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        await state.clear()
+
+    except ValueError:
+        await message.answer("❌ Введите корректную сумму")
+    except Exception as e:
+        logging.error(f"Ошибка при досрочном погашении: {e}")
+        await message.answer("⚠ Ошибка при обработке запроса")
 
 @router.callback_query(F.data == "admin_reports")
-async def reports_start(callback: types.CallbackQuery):
+async def reports_menu(callback: types.CallbackQuery):
     """
-    Запрашивает тип отчета.
-
-    Предлагает выбор между справкой о погашении, повесткой в суд и годовым финансовым отчетом.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 📝 Выберите тип отчета:
-             [📄 Справка о погашении]
-             [⚖ Повестка в суд]
-             [📅 Фин. отчет за год]
+    Меню выбора отчётов.
     """
-    builder = InlineKeyboardBuilder()
-    builder.add(
-        types.InlineKeyboardButton(text="📄 Справка о погашении", callback_data="report_no_obligations"),
-        types.InlineKeyboardButton(text="⚖ Повестка в суд", callback_data="report_court_notice"),
-        types.InlineKeyboardButton(text="📅 Фин. отчет за год", callback_data="report_annual")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📜 Справка об обязательствах",
+                    callback_data="admin_report_no_obligations"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚖ Повестка в суд",
+                    callback_data="admin_report_court_notice"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Годовой отчёт",
+                    callback_data="admin_report_annual"
+                )
+            ]
+        ]
     )
-    builder.adjust(1)
 
-    await callback.message.answer(
-        "📝 Выберите тип отчета:",
-        reply_markup=builder.as_markup()
+    await callback.message.edit_text(
+        "📈 Выберите тип отчёта:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
+    await callback.answer()
 
-@router.callback_query(F.data == "report_no_obligations")
-async def report_no_obligations_start(callback: types.CallbackQuery):
+@router.callback_query(F.data == "admin_report_no_obligations")
+async def report_no_obligations(callback: types.CallbackQuery):
     """
-    Запрашивает ID кредита для справки о погашении.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 📄 Введите ID кредита для справки о погашении:
+    Генерация справки об отсутствии обязательств.
     """
+    await callback.message.edit_text(
+        "📜 Введите ID клиента для справки об отсутствии обязательств:",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
     await callback.message.answer(
-        "📄 Введите ID кредита для справки о погашении:",
+        "Введите ID клиента:",
         reply_markup=types.ForceReply(selective=True)
     )
+    await callback.answer()
 
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("📄 Введите ID кредита"))
+@router.message(F.reply_to_message & F.reply_to_message.text == "Введите ID клиента:")
 async def process_no_obligations_report(message: types.Message):
     """
-    Генерирует справку об отсутствии обязательств.
-
-    Проверяет, что кредит погашен, и формирует справку.
-
-    Args:
-        message (types.Message): Сообщение с ID кредита.
-
-    Example:
-        User: 123
-        Bot: ✅ Справка сформирована!
+    Обработка ID клиента и генерация справки.
     """
     if not message.text.isdigit():
         return await message.answer("❌ ID должен быть числом")
 
+    client_id = int(message.text)
     async with async_session() as session:
-        loan = await session.get(Loan, int(message.text))
-        if not loan or loan.status != LoanStatus.CLOSED:
-            return await message.answer("❌ Кредит не найден или не погашен")
+        client = await session.get(Client, client_id)
+        if not client:
+            return await message.answer("❌ Клиент не найден")
 
-        await generate_no_obligations_doc(loan)
-        await message.answer("✅ Справка сформирована!")
-
-@router.callback_query(F.data == "report_court_notice")
-async def report_court_notice_start(callback: types.CallbackQuery):
-    """
-    Запрашивает ID кредита для повестки в суд.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: ⚖ Введите ID кредита для повестки в суд:
-    """
-    await callback.message.answer(
-        "⚖ Введите ID кредита для повестки в суд:",
-        reply_markup=types.ForceReply(selective=True)
-    )
-
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("⚖ Введите ID кредита"))
-async def process_court_notice_report(message: types.Message):
-    """
-    Генерирует повестку в суд.
-
-    Формирует документ для клиента с просроченными платежами.
-
-    Args:
-        message (types.Message): Сообщение с ID кредита.
-
-    Example:
-        User: 123
-        Bot: ✅ Повестка сформирована!
-    """
-    if not message.text.isdigit():
-        return await message.answer("❌ ID должен быть числом")
-
-    async with async_session() as session:
-        loan = await session.get(Loan, int(message.text))
-        if not loan:
-            return await message.answer("❌ Кредит не найден")
-
-        await generate_court_notice(loan)
-        await message.answer("✅ Повестка сформирована!")
-
-@router.callback_query(F.data == "report_annual")
-async def report_annual_start(callback: types.CallbackQuery):
-    """
-    Запрашивает год для финансового отчета.
-
-    Args:
-        callback (types.CallbackQuery): Callback-запрос от инлайн-кнопки.
-
-    Example:
-        Bot: 📅 Введите год для финансового отчета:
-             Пример: 2024
-    """
-    await callback.message.answer(
-        "📅 Введите год для финансового отчета:\n"
-        "<i>Пример: 2024</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=types.ForceReply(selective=True)
-    )
-
-@router.message(F.reply_to_message & F.reply_to_message.text.startswith("📅 Введите год"))
-async def process_annual_report(message: types.Message):
-    """
-    Генерирует финансовый отчет за год.
-
-    Показывает сумму выданных кредитов, погашенных сумм и начисленных пеней за указанный год.
-
-    Args:
-        message (types.Message): Сообщение с годом.
-
-    Example:
-        User: 2024
-        Bot: 📊 Финансовый отчет за 2024 год
-             • Выдано кредитов: 10000000 руб.
-             • Погашено: 5000000 руб.
-             • Пени: 50000 руб.
-    """
-    if not message.text.isdigit():
-        return await message.answer("❌ Год должен быть числом")
-
-    year = int(message.text)
-    async with async_session() as session:
-        loans = await session.execute(
-            select(Loan).where(
-                func.extract('year', Loan.issue_date) == year
+        active_loans = await session.scalar(
+            select(func.count(Loan.loan_id))
+            .where(
+                and_(
+                    Loan.client_id == client_id,
+                    Loan.status.in_([LoanStatus.ACTIVE, LoanStatus.OVERDUE])
+                )
             )
         )
-        loans = loans.scalars().all()
+        if active_loans > 0:
+            return await message.answer(
+                "❌ У клиента есть непогашенные кредиты. Справка не может быть выдана."
+            )
 
-        total_issued = sum(loan.amount for loan in loans)
-        total_repaid = sum(
-            sum(p['amount'] for p in loan.payment_schedule if p['paid'])
-            for loan in loans
+    report_content = (
+        f"Справка об отсутствии обязательств\n\n"
+        f"Клиент: {client.fullName}\n"
+        f"ID клиента: {client_id}\n"
+        f"Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        "Настоящим подтверждается, что по состоянию на указанную дату "
+        "у клиента отсутствуют непогашенные кредитные обязательства."
+    )
+
+    from io import BytesIO
+    report_file = BytesIO(report_content.encode('utf-8'))
+    report_file.name = f"no_obligations_{client_id}.txt"
+
+    await message.answer_document(
+        types.BufferedInputFile(
+            report_file.getvalue(),
+            filename=report_file.name
+        ),
+        caption="📜 Справка об отсутствии обязательств",
+        reply_markup=get_admin_nav_keyboard()
+    )
+
+@router.callback_query(F.data == "admin_report_court_notice")
+async def report_court_notice(callback: types.CallbackQuery):
+    """
+    Генерация повестки в суд.
+    """
+    await callback.message.edit_text(
+        "⚖ Введите ID клиента для повестки в суд:",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.message.answer(
+        "Введите ID клиента:",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    await callback.answer()
+
+@router.message(F.reply_to_message & F.reply_to_message.text == "Введите ID клиента:")
+async def process_court_notice_report(message: types.Message):
+    """
+    Обработка ID клиента и генерация повестки.
+    """
+    if not message.text.isdigit():
+        return await message.answer("❌ ID должен быть числом")
+
+    client_id = int(message.text)
+    async with async_session() as session:
+        client = await session.get(Client, client_id)
+        if not client:
+            return await message.answer("❌ Клиент не найден")
+
+        overdue_payments = await session.scalar(
+            select(func.count(Payment.payment_id))
+            .where(
+                Payment.loan_id.in_(
+                    select(Loan.loan_id)
+                    .where(Loan.client_id == client_id)
+                    .where(Loan.status == LoanStatus.OVERDUE)
+                )
+            )
+            .where(Payment.payment_date_fact.is_(None))
+            .where(Payment.payment_date_plan < date.today())
         )
-        penalties = sum(
-            sum(p['amount'] * Decimal('0.01') * (datetime.now() - p['date']).days
-                for p in loan.payment_schedule
-                if not p['paid'] and p['date'] < datetime.now())
-            for loan in loans
+        if overdue_payments < 3:
+            return await message.answer(
+                "❌ У клиента недостаточно просрочек для повестки (требуется 3+)"
+            )
+
+        total_debt = await session.scalar(
+            select(func.sum(Loan.remaining_amount))
+            .where(Loan.client_id == client_id)
+            .where(Loan.status == LoanStatus.OVERDUE)
         )
+        total_debt = total_debt or Decimal('0')
 
-        report = (
-            f"📊 <b>Финансовый отчет за {year} год</b>\n\n"
-            f"• Выдано кредитов: {total_issued} руб.\n"
-            f"• Погашено: {total_repaid} руб.\n"
-            f"• Пени: {penalties} руб."
-        )
+    report_content = (
+        f"Повестка в суд\n\n"
+        f"Клиент: {client.fullName}\n"
+        f"ID клиента: {client_id}\n"
+        f"Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        f"Уважаемый(ая) {client.fullName},\n"
+        "В связи с неоднократным нарушением условий кредитного договора "
+        f"(просрочено {overdue_payments} платежей, общая задолженность: {total_debt:.2f} руб.), "
+        "вызываетесь в суд для рассмотрения дела о взыскании задолженности.\n"
+        "Дата заседания: [Указать дату]\n"
+        "Адрес суда: [Указать адрес]"
+    )
 
-        await message.answer(report, parse_mode=ParseMode.HTML)
+    from io import BytesIO
+    report_file = BytesIO(report_content.encode('utf-8'))
+    report_file.name = f"court_notice_{client_id}.txt"
 
-# ---- Вспомогательные функции ----
+    await message.answer_document(
+        types.BufferedInputFile(
+            report_file.getvalue(),
+            filename=report_file.name
+        ),
+        caption="⚖ Повестка в суд",
+        reply_markup=get_admin_nav_keyboard()
+    )
 
-def calculate_max_loan_amount(credit_score: int) -> Decimal:
+@router.callback_query(F.data == "admin_report_annual")
+async def report_annual(callback: types.CallbackQuery):
     """
-    Определяет максимальную сумму кредита по кредитному рейтингу.
-
-    Args:
-        credit_score (int): Кредитный рейтинг клиента (0–1000).
-
-    Returns:
-        Decimal: Максимальная сумма кредита в рублях.
-
-    Example:
-        >>> calculate_max_loan_amount(850)
-        Decimal('1000000')
-    """
-    if credit_score >= 800:
-        return Decimal('1000000')
-    elif credit_score >= 600:
-        return Decimal('500000')
-    elif credit_score >= 400:
-        return Decimal('200000')
-    else:
-        return Decimal('50000')
-
-def calculate_annuity_payment(principal: Decimal, monthly_rate: Decimal, term: int) -> Decimal:
-    """
-    Рассчитывает аннуитетный платеж.
-
-    Args:
-        principal (Decimal): Основная сумма кредита.
-        monthly_rate (Decimal): Месячная процентная ставка.
-        term (int): Срок кредита в месяцах.
-
-    Returns:
-        Decimal: Размер ежемесячного платежа.
-
-    Example:
-        >>> calculate_annuity_payment(Decimal('500000'), Decimal('0.008333'), 12)
-        Decimal('45000.00')
-    """
-    if monthly_rate == 0:
-        return principal / term
-    x = (1 + monthly_rate) ** term
-    return principal * (monthly_rate * x) / (x - 1)
-
-def generate_payment_schedule(principal: Decimal, monthly_payment: Decimal, term: int) -> list:
-    """
-    Генерирует график платежей.
-
-    Args:
-        principal (Decimal): Основная сумма кредита.
-        monthly_payment (Decimal): Ежемесячный платеж.
-        term (int): Срок кредита в месяцах.
-
-    Returns:
-        list: Список словарей с датами, суммами и статусом платежей.
-
-    Example:
-        >>> generate_payment_schedule(Decimal('500000'), Decimal('45000'), 12)
-        [{'date': ..., 'amount': Decimal('45000'), 'paid': False, 'payment_date': None}, ...]
-    """
-    schedule = []
-    remaining = principal
-    current_date = datetime.now()
-
-    for i in range(term):
-        schedule.append({
-            'date': current_date + timedelta(days=30 * (i + 1)),
-            'amount': monthly_payment,
-            'paid': False,
-            'payment_date': None
-        })
-        remaining -= monthly_payment
-        if remaining <= 0:
-            break
-
-    return schedule
-
-def recalculate_payment_schedule(loan: Loan, extra_payment: Decimal) -> list:
-    """
-    Перерасчитывает график платежей.
-
-    Учитывает дополнительный платеж или просрочки для обновления графика.
-
-    Args:
-        loan (Loan): Объект кредита.
-        extra_payment (Decimal): Дополнительный платеж для перерасчета.
-
-    Returns:
-        list: Новый график платежей.
-
-    Example:
-        >>> recalculate_payment_schedule(loan, Decimal('10000'))
-        [{'date': ..., 'amount': Decimal('43000'), 'paid': False, 'payment_date': None}, ...]
-    """
-    remaining = loan.remaining_amount - extra_payment
-    monthly_rate = loan.annual_interest_rate / 12
-    remaining_term = sum(1 for p in loan.payment_schedule if not p['paid'])
-
-    if remaining_term <= 0 or remaining <= 0:
-        return loan.payment_schedule
-
-    new_monthly_payment = calculate_annuity_payment(remaining, monthly_rate, remaining_term)
-    current_date = datetime.now()
-
-    new_schedule = [
-        p for p in loan.payment_schedule if p['paid']
-    ]
-    for i in range(remaining_term):
-        new_schedule.append({
-            'date': current_date + timedelta(days=30 * (i + 1)),
-            'amount': new_monthly_payment,
-            'paid': False,
-            'payment_date': None
-        })
-
-    return new_schedule
-
-async def generate_no_obligations_doc(loan: Loan):
-    """
-    Генерирует справку об отсутствии обязательств.
-
-    Формирует текстовую справку для погашенного кредита.
-
-    Args:
-        loan (Loan): Объект кредита.
-
-    Example:
-        Bot: 📄 Справка об отсутствии обязательств
-             • Клиент: Иванов Иван Иванович
-             • Кредит №123
-             • Сумма: 500000 руб.
-             • Дата закрытия: 23.04.2025
-             • Статус: Погашен
+    Генерация годового финансового отчёта.
     """
     async with async_session() as session:
-        client = await session.get(Client, loan.client_id)
-        doc = (
-            f"📄 <b>Справка об отсутствии обязательств</b>\n\n"
-            f"• Клиент: {client.fullName}\n"
-            f"• Кредит №{loan.loan_id}\n"
-            f"• Сумма: {loan.amount} руб.\n"
-            f"• Дата закрытия: {datetime.now().strftime('%d.%m.%Y')}\n"
-            f"• Статус: Погашен"
+        year = datetime.now().year - 1
+        total_loans = await session.scalar(
+            select(func.count(Loan.loan_id))
+            .where(func.extract('year', Loan.issue_date) == year)
         )
-        logging.info(f"Справка для кредита {loan.loan_id} сформирована")
-
-async def generate_court_notice(loan: Loan):
-    """
-    Генерирует повестку в суд.
-
-    Формирует текстовую повестку для клиента с просроченными платежами.
-
-    Args:
-        loan (Loan): Объект кредита.
-
-    Example:
-        Bot: ⚖ Повестка в суд
-             • Клиент: Иванов Иван Иванович
-             • Кредит №123
-             • Просроченная сумма: 150000 руб.
-             • Количество просрочек: 3
-             • Дата: 23.04.2025
-    """
-    async with async_session() as session:
-        client = await session.get(Client, loan.client_id)
-        overdue_payments = [p for p in loan.payment_schedule if not p['paid'] and p['date'] < datetime.now()]
-        total_overdue = sum(p['amount'] for p in overdue_payments)
-        doc = (
-            f"⚖ <b>Повестка в суд</b>\n\n"
-            f"• Клиент: {client.fullName}\n"
-            f"• Кредит №{loan.loan_id}\n"
-            f"• Просроченная сумма: {total_overdue} руб.\n"
-            f"• Количество просрочек: {len(overdue_payments)}\n"
-            f"• Дата: {datetime.now().strftime('%d.%m.%Y')}"
+        total_amount = await session.scalar(
+            select(func.sum(Loan.amount))
+            .where(func.extract('year', Loan.issue_date) == year)
         )
-        logging.info(f"Повестка для кредита {loan.loan_id} сформирована")
+        total_payments = await session.scalar(
+            select(func.sum(Payment.actual_amount))
+            .where(func.extract('year', Payment.payment_date_fact) == year)
+        )
+        total_penalties = await session.scalar(
+            select(func.sum(Payment.penalty_amount))
+            .where(func.extract('year', Payment.penalty_date) == year)
+        )
+
+        total_amount = total_amount or Decimal('0')
+        total_payments = total_payments or Decimal('0')
+        total_penalties = total_penalties or Decimal('0')
+
+    report_content = (
+        f"Годовой финансовый отчёт за {year} год\n\n"
+        f"Дата формирования: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        f"• Выдано кредитов: {total_loans}\n"
+        f"• Общая сумма кредитов: {total_amount:.2f} руб.\n"
+        f"• Погашено: {total_payments:.2f} руб.\n"
+        f"• Начислено пеней: {total_penalties:.2f} руб."
+    )
+
+    from io import BytesIO
+    report_file = BytesIO(report_content.encode('utf-8'))
+    report_file.name = f"annual_report_{year}.txt"
+
+    await callback.message.edit_text(
+        f"📅 Годовой отчёт за {year} сформирован",
+        reply_markup=get_admin_nav_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.message.answer_document(
+        types.BufferedInputFile(
+            report_file.getvalue(),
+            filename=report_file.name
+        ),
+        caption=f"📅 Годовой отчёт за {year}"
+    )
+    await callback.answer()
