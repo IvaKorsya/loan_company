@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from sqlalchemy import BigInteger, String, Integer, DateTime, JSON, Date
+from sqlalchemy import BigInteger, String, Integer, DateTime, JSON, Date, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base, LoanStatus
 import phonenumbers  # pip install phonenumbers
@@ -200,6 +200,8 @@ class Payment(Base):
     ------------------------------------------------------------------------------
     penalty_amount      Сумма штрафа за просрочку           NUM(15,2)
     ------------------------------------------------------------------------------
+    is_early_payment    Признак досрочного платежа          BOOL, по умолчанию False
+    ------------------------------------------------------------------------------
 
     ОТНОШЕНИЯ
     loans   1----inf    payments
@@ -222,6 +224,9 @@ class Payment(Base):
                         comment='Дата начисления штрафа (NULL если нет штрафа)')
     penalty_amount = Column(Numeric(15, 2), default=0.00,
                           comment='Сумма штрафа за просрочку')
+    is_early_payment = Column(Boolean, default=False, 
+                              comment="Признак досрочного платежа (по умолчанию False)")
+
 
     # Связи
     loan = relationship("Loan", back_populates="payments")
