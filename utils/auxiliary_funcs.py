@@ -1,3 +1,4 @@
+import logging
 from aiogram.types import Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from datetime import date
