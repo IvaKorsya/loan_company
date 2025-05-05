@@ -67,10 +67,10 @@ async def update_payment_and_loan(session, payment, loan, amount, payment_date, 
         # Обновляем данные платежа
         payment.payment_date_fact = payment_date
         payment.actual_amount = float(amount)
-        
+
         # Обновляем остаток по кредиту
         loan.remaining_amount -= Decimal(str(amount))
-        
+
         # Находим следующий платеж
         next_payment = await session.scalar(
             select(Payment)
@@ -79,17 +79,17 @@ async def update_payment_and_loan(session, payment, loan, amount, payment_date, 
             .order_by(Payment.payment_date_plan.asc())
             .limit(1)
         )
-        
+
         # Обновляем дату следующего платежа
         loan.next_payment_date = next_payment.payment_date_plan if next_payment else None
-        
+
         # Если кредит полностью погашен
         if loan.remaining_amount <= 0:
-            loan.status = "PAID"
+            loan.status = "CLOSE"
             loan.next_payment_date = None
-        
+
         await session.commit()
-        
+
     except Exception as e:
         logging.error(f"Ошибка при обновлении платежа и кредита: {e}", exc_info=True)
         raise
@@ -130,7 +130,7 @@ async def show_payment_schedule(message: Message, loan_id: int, session: AsyncSe
         for payment in payments:
             payment_date = payment.payment_date_plan.strftime('%d.%m.%Y')
             amount = f"{Decimal(str(payment.planned_amount)):.2f} руб."
-            
+
             if payment.payment_date_fact:
                 status = "✅ Оплачен"
                 if payment.payment_date_fact > payment.payment_date_plan:
@@ -147,12 +147,12 @@ async def show_payment_schedule(message: Message, loan_id: int, session: AsyncSe
 
         # Добавляем итоговую информацию
         total_paid = sum(
-            Decimal(str(p.actual_amount)) 
-            for p in payments 
+            Decimal(str(p.actual_amount))
+            for p in payments
             if p.actual_amount is not None
         )
         total_planned = sum(Decimal(str(p.planned_amount)) for p in payments)
-        
+
         msg.extend([
             "\n<b>Итого:</b>",
             f"🔹 Запланировано: {total_planned:.2f} руб.",
