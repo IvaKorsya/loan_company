@@ -276,7 +276,7 @@ async def show_profile(message: types.Message):
 
 #Далее кредиты и платежи
 
-#ПРОСМОТР ПЛАНА ПЛАТЕЖЕЙ С ВЫБОРОМ КРЕДИТА 
+#ПРОСМОТР ПЛАНА ПЛАТЕЖЕЙ С ВЫБОРОМ КРЕДИТА
 @router.message(Command("payments_plan"))
 async def choose_loan_for_schedule(message: Message):
     """Команда для выбора кредита и просмотра графика платежей"""
@@ -297,11 +297,11 @@ async def choose_loan_for_schedule(message: Message):
                 .order_by(Loan.loan_id.asc())
             )
             active_loans = active_loans.all()
-        
+
         if not active_loans:
             await message.answer("ℹ У вас нет активных кредитов.")
             return
-        
+
         # Формируем клавиатуру
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -314,12 +314,12 @@ async def choose_loan_for_schedule(message: Message):
                 for loan in active_loans
             ]
         )
-        
+
         await message.answer(
             "🔹 Выберите кредит, чтобы посмотреть график платежей:",
             reply_markup=keyboard
         )
-        
+
     except Exception as e:
         logging.error(f"Ошибка при выборе кредита для графика: {e}", exc_info=True)
         await message.answer("⚠ Произошла ошибка при получении списка кредитов.")
@@ -368,9 +368,9 @@ async def show_client_loans(message: types.Message):
 
         if not loans:
             return await message.answer("У вас нет активных кредитов")
-            
+
         response = ["📋 <b>Ваши кредиты:</b>"]
-        
+
         for loan in loans:
             status_emoji = "🟢" if loan.status == LoanStatus.ACTIVE else "🔴"
             response.append(
@@ -405,7 +405,7 @@ async def start_loan_process(message: types.Message, state: FSMContext):
                 )
             )
         )
-        
+
         if active_loans.scalar() > 0:
             return await message.answer(
                 "❌ У вас есть непогашенные кредиты. "
@@ -422,7 +422,7 @@ async def start_loan_process(message: types.Message, state: FSMContext):
         # Создаем клавиатуру с типами кредитов
         keyboard = types.ReplyKeyboardMarkup(
             keyboard=[
-                [types.KeyboardButton(text=f"{lt.name} ({lt.interest_rate}%)")] 
+                [types.KeyboardButton(text=f"{lt.name} ({lt.interest_rate}%)")]
                 for lt in loan_types
             ],
             resize_keyboard=True,
@@ -462,7 +462,7 @@ async def process_loan_type(message: types.Message, state: FSMContext):
                 'max_term': loan_type.max_term,
                 'interest_rate': loan_type.interest_rate
             })
-            
+
             # Запрашиваем сумму кредита
             await message.answer(
                 f"💵 Введите сумму кредита (от {loan_type.min_amount} до {loan_type.max_amount} руб.):",
@@ -481,7 +481,7 @@ async def process_loan_amount(message: types.Message, state: FSMContext):
     try:
         data = await state.get_data()
         amount = Decimal(message.text.replace(',', '.'))
-        
+
         if amount < data['min_amount'] or amount > data['max_amount']:
             raise ValueError(
                 f"Сумма должна быть от {data['min_amount']} до {data['max_amount']} руб."
@@ -502,7 +502,7 @@ async def process_loan_amount(message: types.Message, state: FSMContext):
                 )
 
         await state.update_data({'amount': amount})
-        
+
         # Запрашиваем срок кредита
         await message.answer(
             f"⏳ Введите срок кредита в месяцах (от {int(data['min_term'])} до {int(data['max_term'])}):"
@@ -522,21 +522,21 @@ async def process_loan_term(message: types.Message, state: FSMContext):
     try:
         term = int(message.text)
         data = await state.get_data()
-        
+
         if term < data['min_term'] or term > data['max_term']:
             raise ValueError(
                 f"Срок должен быть от {data['min_term']} до {data['max_term']} месяцев"
             )
 
         await state.update_data({'term': term})
-        
+
         # Рассчитываем примерный платеж
         monthly_payment = calculate_monthly_payment(
             data['amount'],
             term,
             data['interest_rate']
         )
-        
+
         # Показываем подтверждение
         keyboard = types.ReplyKeyboardMarkup(
             keyboard=[
@@ -545,7 +545,7 @@ async def process_loan_term(message: types.Message, state: FSMContext):
             ],
             resize_keyboard=True
         )
-        
+
         await message.answer(
             f"📋 <b>Детали кредита:</b>\n\n"
             f"Тип: {message.text.split('(')[0].strip()}\n"
@@ -573,7 +573,7 @@ async def confirm_loan(message: types.Message, state: FSMContext):
         try:
             # Получаем данные из состояния
             data = await state.get_data()
-            
+
             # Получаем клиента
             client = await check_client_registered(message, session)
             if not client:
@@ -590,12 +590,12 @@ async def confirm_loan(message: types.Message, state: FSMContext):
                 total_paid=Decimal('0.00'),
                 remaining_amount=Decimal(data['amount'])
             )
-            
+
             session.add(new_loan)
             await session.flush()  # Получаем loan_id
-            
+
             # Генерируем график платежей
-            
+
             payments = await generate_payment_schedule(
                 loan_id=new_loan.loan_id,
                 amount=Decimal(data['amount']),
@@ -603,31 +603,31 @@ async def confirm_loan(message: types.Message, state: FSMContext):
                 interest_rate=data['interest_rate'],
                 start_date=datetime.utcnow().date(),
                 session=session
-            )   
-            
+            )
+
             # Добавляем платежи в сессию
             if payments:
                 for payment in payments:
                     session.add(payment)
             else:
                 logging.error("Нет платежей для обработки")
-            
+
             # Обновляем кредитный рейтинг клиента
             client.creditScore = min(1000, client.creditScore + 10)  # Небольшой бонус за взятие кредита
-            
+
             await session.commit()
-            
+
             # Рассчитываем точный ежемесячный платеж
             monthly_payment = calculate_monthly_payment(
                 Decimal(data['amount']),
                 data['term'],
                 data['interest_rate']
             )
-            
+
             # Создаем CSV файл с графиком платежей
             csv_file = generate_payments_csv(payments, new_loan.loan_id)
 
-            
+
             # Отправляем сообщение с деталями кредита
             await message.answer(
                 "✅ <b>Кредит успешно оформлен!</b>\n\n"
@@ -640,10 +640,10 @@ async def confirm_loan(message: types.Message, state: FSMContext):
                 reply_markup=ReplyKeyboardRemove(),
                 parse_mode=ParseMode.HTML
             )
-            
+
             # Отправляем файл пользователю
             await message.answer_document(csv_file)
-            
+
         except Exception as e:
             await session.rollback()
             logging.error(f"Ошибка оформления кредита: {e}", exc_info=True)
@@ -663,7 +663,7 @@ async def cancel_loan(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-#ВНЕСЕНИЕ ПЛАТЕЖА С ПЕРЕРАСЧЕТОМ ПЛАТЕЖЕЙ ПРИ СУММЕ БОЛЬШЕЙ, ЧЕМ НУЖНО 
+#ВНЕСЕНИЕ ПЛАТЕЖА С ПЕРЕРАСЧЕТОМ ПЛАТЕЖЕЙ ПРИ СУММЕ БОЛЬШЕЙ, ЧЕМ НУЖНО
 @router.message(Command("make_payment"))
 async def start_payment_process(message: types.Message, state: FSMContext):
     """Более компактная версия с проверками"""
@@ -678,7 +678,7 @@ async def start_payment_process(message: types.Message, state: FSMContext):
             .where(Loan.status.in_([LoanStatus.ACTIVE, LoanStatus.OVERDUE])
         ))
         loans = loans.all()  # Получаем все записи
-        
+
         if not loans:
             return await message.answer("У вас нет активных кредитов для погашения")
 
@@ -686,22 +686,22 @@ async def start_payment_process(message: types.Message, state: FSMContext):
         print(f"Found {len(loans)} active loans for client {client.clientID}")
 
         await state.update_data(loans={loan.loan_id: loan for loan in loans})
-        
+
         # Создаем кнопки для кредитов (максимум 10 чтобы не перегружать интерфейс)
         loan_buttons = [
-            [types.KeyboardButton(text=f"Кредит #{l.loan_id} - {l.amount:,.2f}₽")] 
+            [types.KeyboardButton(text=f"Кредит #{l.loan_id} - {l.amount:,.2f}₽")]
             for l in loans[:10]  # Ограничиваем количество
         ]
-        
+
         # Добавляем кнопку отмены
         loan_buttons.append([types.KeyboardButton(text="❌ Отмена")])
-        
+
         kb = types.ReplyKeyboardMarkup(
             keyboard=loan_buttons,
             resize_keyboard=True,
             one_time_keyboard=True
         )
-        
+
         await message.answer(
             f"Выберите кредит (доступно {len(loans)}):",
             reply_markup=kb
@@ -713,7 +713,7 @@ async def choose_loan_for_payment(message: types.Message, state: FSMContext):
     """Обработка выбора кредита с использованием существующих платежей из БД"""
     try:
         loan_id = int(message.text.split('#')[1].split()[0])
-        
+
         async with async_session() as session:
             # Получаем данные по кредиту
             loan = await session.get(Loan, loan_id)
@@ -721,7 +721,7 @@ async def choose_loan_for_payment(message: types.Message, state: FSMContext):
                 await message.answer("❌ Кредит не найден")
                 await state.clear()
                 return
-            
+
             # Получаем все платежи по кредиту из БД
             payments = await session.scalars(
                 select(Payment)
@@ -732,11 +732,11 @@ async def choose_loan_for_payment(message: types.Message, state: FSMContext):
 
             # Рассчитываем общую сумму оплаченных платежей
             total_paid = sum(
-                Decimal(str(p.actual_amount)) 
-                for p in payments 
+                Decimal(str(p.actual_amount))
+                for p in payments
                 if p.actual_amount is not None
             )
-            
+
             # Обновляем остаток долга
             loan.remaining_amount = loan.amount - total_paid
 
@@ -776,7 +776,7 @@ async def choose_loan_for_payment(message: types.Message, state: FSMContext):
                         .where(Payment.penalty_date == today)
                         .where(Payment.payment_date_plan == payment.payment_date_plan)
                     )
-                    
+
                     if not existing_penalty:
                         penalty_payment = Payment(
                             loan_id=loan_id,
@@ -788,7 +788,7 @@ async def choose_loan_for_payment(message: types.Message, state: FSMContext):
                             penalty_amount=float(penalty)
                         )
                         session.add(penalty_payment)
-                
+
                 await session.commit()
 
             # Сохраняем данные для следующего шага
@@ -812,16 +812,16 @@ async def choose_loan_for_payment(message: types.Message, state: FSMContext):
             if next_payment:
                 msg.append(f"🔹 След. платеж: {next_payment.payment_date_plan.strftime('%d.%m.%Y')}")
                 msg.append(f"🔹 Сумма платежа: {next_payment.planned_amount:.2f} руб.")
-            
+
             if overdue_payments:
                 days_overdue = (today - overdue_payments[0].payment_date_plan).days
                 msg.append(f"⚠ <b>Просрочка:</b> {days_overdue} дней")
-            
+
             if penalty_amount > 0:
                 msg.append(f"⚠ <b>Пени:</b> {penalty_amount:.2f} руб. (1%/день)")
 
             msg.append("\nВведите сумму платежа:")
-            
+
             await message.answer(
                 "\n".join(msg),
                 reply_markup=types.ReplyKeyboardRemove(),
@@ -841,11 +841,11 @@ async def process_payment_amount(message: types.Message, state: FSMContext):
         amount = Decimal(message.text)
         if amount <= 0:
             raise ValueError("Сумма должна быть больше нуля")
-            
+
         data = await state.get_data()
         loan_id = data['loan_id']
         current_date = date.today()
-        
+
         async with async_session() as session:
             # Получаем данные по кредиту
             loan = await session.get(Loan, loan_id)
@@ -853,7 +853,7 @@ async def process_payment_amount(message: types.Message, state: FSMContext):
                 await message.answer("❌ Кредит не найден")
                 await state.clear()
                 return
-            
+
             # Ищем платеж для проверки минимальной суммы
             payment = await session.scalar(
                 select(Payment)
@@ -862,26 +862,26 @@ async def process_payment_amount(message: types.Message, state: FSMContext):
                 .order_by(Payment.payment_date_plan.asc())
                 .limit(1)
             )
-            
+
             if not payment:
                 await message.answer("ℹ Нет платежей для погашения")
                 await state.clear()
                 return
-            
+
             min_payment = Decimal(str(payment.planned_amount))
-            
+
             # Проверяем превышение суммы долга
             if amount > loan.remaining_amount:
                 amount = loan.remaining_amount
                 await message.answer(
                     f"⚠ Сумма превышает остаток долга. Будет зачислено {amount:.2f} руб."
                 )
-            
+
             # Проверяем, превышает ли сумма минимальный платеж
             if round(amount, 2) > round(min_payment, 2):
                 # Сохраняем предложенную сумму в состоянии
                 await state.update_data(proposed_amount=amount)
-                
+
                 # Создаем инлайн-клавиатуру
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
@@ -897,14 +897,14 @@ async def process_payment_amount(message: types.Message, state: FSMContext):
                         )
                     ]
                 ])
-                
+
                 await message.answer(
                     f"ℹ Введенная сумма ({amount:.2f} руб.) превышает ежемесячный платеж ({min_payment:.2f} руб.).\n"
                     "Выберите действие:",
                     reply_markup=keyboard
                 )
                 return
-                
+
             # Проверяем минимальную сумму
             if round(amount, 2) < round(min_payment, 2):
                 await message.answer(
@@ -912,17 +912,17 @@ async def process_payment_amount(message: types.Message, state: FSMContext):
                     "Пожалуйста, введите сумму, равную или большую минимального платежа:"
                 )
                 return
-            
+
             # Обновляем платеж
             await update_payment_and_loan(session, payment, loan, amount, current_date, loan_id)
-            
+
             # Проверяем, если кредит полностью закрыт
             if loan.remaining_amount <= 0:
                 # Завершаем кредит
                 loan.remaining_amount = Decimal('0')
                 loan.next_payment_date = None
                 loan.status = LoanStatus.CLOSED  # Используем значение из перечисления
-                
+
                 # Удаляем все будущие неоплаченные платежи
                 await session.execute(
                     delete(Payment)
@@ -940,10 +940,10 @@ async def process_payment_amount(message: types.Message, state: FSMContext):
                 f"🔹 След. платеж: {loan.next_payment_date.strftime('%d.%m.%Y') if loan.next_payment_date else 'нет'}\n\n"
                 "Спасибо за своевременный платеж!"
             )
-            
+
             await message.answer(response_msg, parse_mode=ParseMode.HTML)
             await state.clear()
-            
+
     except ValueError as e:
         await message.answer(f"❌ Ошибка: {str(e)}\nПожалуйста, введите корректную сумму:")
     except Exception as e:
@@ -960,7 +960,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
         amount = Decimal(data['proposed_amount'])
         loan_id = data['loan_id']
         current_date = date.today()
-        
+
         async with async_session() as session:
             # Получаем кредит с загруженным типом
             loan = await session.get(Loan, loan_id, options=[joinedload(Loan.loan_type)])
@@ -968,13 +968,13 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 await callback.message.answer("❌ Кредит не найден")
                 await state.clear()
                 return
-                
+
             # Проверяем наличие типа кредита и процентной ставки
             if not loan.loan_type or not hasattr(loan.loan_type, 'interest_rate'):
                 await callback.message.answer("❌ Не удалось определить процентную ставку по кредиту")
                 await state.clear()
                 return
-                
+
             # Находим первый непогашенный платеж
             payment = await session.scalar(
                 select(Payment)
@@ -983,19 +983,19 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 .order_by(Payment.payment_date_plan.asc())
                 .limit(1)
             )
-            
+
             if not payment:
                 await callback.message.answer("ℹ Нет платежей для погашения")
                 await state.clear()
                 return
-            
+
             # 1. Отмечаем текущий платеж как оплаченный
             payment.payment_date_fact = current_date
             payment.actual_amount = amount
-            
+
             # 2. Вычисляем новый остаток
             remaining_amount = loan.remaining_amount - amount
-            
+
             # 3. Удаляем только будущие неоплаченные платежи
             await session.execute(
                 delete(Payment)
@@ -1003,7 +1003,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 .where(Payment.payment_date_plan > payment.payment_date_plan)
                 .where(Payment.payment_date_fact.is_(None))
             )
-            
+
             # 4. Вычисляем оставшийся срок
             remaining_term = loan.term - (await session.scalar(
                 select(func.count(Payment.payment_id))
@@ -1012,7 +1012,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                     (Payment.payment_date_fact.is_not(None))
                 )
             ))
-            
+
             # 5. Определяем дату старта новых платежей — следующий месяц после текущего платежа
             # Получаем последний плановый платеж
             last_payment = await session.scalar(
@@ -1022,7 +1022,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 .limit(1))
             start_date = last_payment.payment_date_plan if last_payment else date.today()
 
-            
+
             # 6. Генерируем новый график платежей
             new_payments = await generate_payment_schedule(
                 loan_id=loan_id,
@@ -1033,7 +1033,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 session=session
             )
 
-            
+
             # 7. Обновляем данные кредита
             loan.remaining_amount = remaining_amount
             loan.next_payment_date = new_payments[0].payment_date_plan if new_payments else None
@@ -1045,7 +1045,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
 
             # 8. Коммитим изменения
             await session.commit()
-            
+
             # Формируем сообщение
             response_msg = (
                 "✅ <b>Платеж успешно зачислен!</b>\n\n"
@@ -1055,10 +1055,10 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 f"🔹 След. платеж: {loan.next_payment_date.strftime('%d.%m.%Y') if loan.next_payment_date else 'нет'}\n\n"
                 "Спасибо за своевременный платеж!"
             )
-            
+
             await callback.message.edit_text(response_msg, parse_mode=ParseMode.HTML)
             await state.clear()
-            
+
     except Exception as e:
         logging.error(f"Ошибка при подтверждении платежа: {e}", exc_info=True)
         await callback.message.answer("⚠ Произошла ошибка при обработке платежа. Попробуйте позже.")
@@ -1073,7 +1073,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
         amount = Decimal(data['proposed_amount'])
         loan_id = data['loan_id']
         current_date = date.today()
-        
+
         async with async_session() as session:
             # Получаем кредит с загруженным типом
             loan = await session.get(Loan, loan_id, options=[joinedload(Loan.loan_type)])
@@ -1081,13 +1081,13 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 await callback.message.answer("❌ Кредит не найден")
                 await state.clear()
                 return
-                
+
             # Проверяем наличие типа кредита и процентной ставки
             if not loan.loan_type or not hasattr(loan.loan_type, 'interest_rate'):
                 await callback.message.answer("❌ Не удалось определить процентную ставку по кредиту")
                 await state.clear()
                 return
-                
+
             # Находим первый непогашенный платеж
             payment = await session.scalar(
                 select(Payment)
@@ -1096,19 +1096,19 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 .order_by(Payment.payment_date_plan.asc())
                 .limit(1)
             )
-            
+
             if not payment:
                 await callback.message.answer("ℹ Нет платежей для погашения")
                 await state.clear()
                 return
-            
+
             # 1. Отмечаем текущий платеж как оплаченный
             payment.payment_date_fact = current_date
             payment.actual_amount = amount
-            
+
             # 2. Вычисляем новый остаток
             remaining_amount = loan.remaining_amount - amount
-            
+
             # 3. Удаляем только будущие неоплаченные платежи
             await session.execute(
                 delete(Payment)
@@ -1116,7 +1116,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 .where(Payment.payment_date_plan > payment.payment_date_plan)
                 .where(Payment.payment_date_fact.is_(None))
             )
-            
+
             # 4. Вычисляем оставшийся срок
             remaining_term = loan.term - (await session.scalar(
                 select(func.count(Payment.payment_id))
@@ -1125,7 +1125,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                     (Payment.payment_date_fact.is_not(None))
                 )
             ))
-            
+
             # 5. Определяем дату старта новых платежей — следующий месяц после текущего платежа
             # Получаем последний плановый платеж
             last_payment = await session.scalar(
@@ -1135,7 +1135,7 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 .limit(1))
             start_date = last_payment.payment_date_plan if last_payment else date.today()
 
-            
+
             # 6. Генерируем новый график платежей
             new_payments = await generate_payment_schedule(
                 loan_id=loan_id,
@@ -1146,14 +1146,14 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 session=session
             )
 
-            
+
             # 7. Обновляем данные кредита
             loan.remaining_amount = remaining_amount
             loan.next_payment_date = new_payments[0].payment_date_plan if new_payments else None
-            
+
             # 8. Коммитим изменения
             await session.commit()
-            
+
             # Формируем сообщение
             response_msg = (
                 "✅ <b>Платеж успешно зачислен!</b>\n\n"
@@ -1163,10 +1163,10 @@ async def confirm_recalculate(callback: types.CallbackQuery, state: FSMContext):
                 f"🔹 След. платеж: {loan.next_payment_date.strftime('%d.%m.%Y') if loan.next_payment_date else 'нет'}\n\n"
                 "Спасибо за своевременный платеж!"
             )
-            
+
             await callback.message.edit_text(response_msg, parse_mode=ParseMode.HTML)
             await state.clear()
-            
+
     except Exception as e:
         logging.error(f"Ошибка при подтверждении платежа: {e}", exc_info=True)
         await callback.message.answer("⚠ Произошла ошибка при обработке платежа. Попробуйте позже.")
@@ -1196,8 +1196,8 @@ async def check_credit_status(message: Message, state: FSMContext):
         )
         loans_list = active_or_overdue_loans.all()
         # Получаем кредитный рейтинг клиента
-        credit_score = client.creditScore  
-        
+        credit_score = client.creditScore
+
         # Получаем текущий статус кредита
         credit_status = get_credit_status(credit_score)
         max_credit_amount = get_max_credit_amount(credit_score)
@@ -1212,7 +1212,7 @@ async def check_credit_status(message: Message, state: FSMContext):
             "\n<b>Рекомендации для улучшения:</b>",
             credit_advice
         ]
-        
+
         # Если есть активные или просроченные кредиты, добавляем это в сообщение
         if loans_list:
             msg.append("\n❌ ОТКАЗАНО В ВЫДАЧЕ\n У вас есть активные кредиты или просроченные задолженности. "
@@ -1242,25 +1242,25 @@ async def start_early_repayment_process(message: types.Message, state: FSMContex
             Loan.status.in_([LoanStatus.ACTIVE, LoanStatus.OVERDUE]))
         )
         loans = loans.all()
-        
+
         if not loans:
             return await message.answer("У вас нет активных кредитов для досрочного погашения")
 
         await state.update_data(loans={loan.loan_id: loan for loan in loans})
-        
+
         # Создаем кнопки для кредитов
         loan_buttons = [
-            [types.KeyboardButton(text=f"Кредит #{l.loan_id} - {l.amount:,.2f}₽")] 
+            [types.KeyboardButton(text=f"Кредит #{l.loan_id} - {l.amount:,.2f}₽")]
             for l in loans[:10]  # Ограничиваем количество
         ]
         loan_buttons.append([types.KeyboardButton(text="❌ Отмена")])
-        
+
         kb = types.ReplyKeyboardMarkup(
             keyboard=loan_buttons,
             resize_keyboard=True,
             one_time_keyboard=True
         )
-        
+
         await message.answer(
             f"Выберите кредит для досрочного погашения:",
             reply_markup=kb
@@ -1272,14 +1272,14 @@ async def choose_loan_for_early_repayment(message: types.Message, state: FSMCont
     """Обработка выбора кредита для досрочного погашения"""
     try:
         loan_id = int(message.text.split('#')[1].split()[0])
-        
+
         async with async_session() as session:
             loan = await session.get(Loan, loan_id, options=[joinedload(Loan.loan_type)])
             if not loan:
                 await message.answer("❌ Кредит не найден")
                 await state.clear()
                 return
-            
+
             # Получаем все платежи
             payments = await session.scalars(
                 select(Payment)
@@ -1287,24 +1287,24 @@ async def choose_loan_for_early_repayment(message: types.Message, state: FSMCont
                 .order_by(Payment.payment_date_plan)
             )
             payments = payments.all()
-            
+
             # Рассчитываем общую сумму оплаченных платежей
             total_paid = sum(
-                Decimal(str(p.actual_amount)) 
-                for p in payments 
+                Decimal(str(p.actual_amount))
+                for p in payments
                 if p.actual_amount is not None
             )
-            
+
             # Обновляем остаток долга
             loan.remaining_amount = loan.amount - total_paid
-            
+
             # Сохраняем данные
             await state.update_data(
                 loan_id=loan_id,
                 current_loan=loan,
                 remaining_amount=loan.remaining_amount
             )
-            
+
             # Создаем клавиатуру с вариантами досрочного погашения
             keyboard = types.ReplyKeyboardMarkup(
                 keyboard=[
@@ -1315,7 +1315,7 @@ async def choose_loan_for_early_repayment(message: types.Message, state: FSMCont
                 resize_keyboard=True,
                 one_time_keyboard=True
             )
-            
+
             await message.answer(
                 f"<b>Кредит #{loan_id}</b>\n"
                 f"Остаток долга: {loan.remaining_amount:.2f}₽\n\n"
@@ -1323,9 +1323,9 @@ async def choose_loan_for_early_repayment(message: types.Message, state: FSMCont
                 reply_markup=keyboard,
                 parse_mode=ParseMode.HTML
             )
-            
+
             await state.set_state(EarlyRepaymentStates.choose_type)
-            
+
     except Exception as e:
         logging.error(f"Ошибка при выборе кредита: {e}", exc_info=True)
         await message.answer("⚠ Ошибка при обработке кредита")
@@ -1338,9 +1338,9 @@ async def choose_early_repayment_type(message: types.Message, state: FSMContext)
         repayment_type = message.text
         data = await state.get_data()
         loan_id = data['loan_id']
-        
+
         await state.update_data(repayment_type=repayment_type)
-        
+
         if repayment_type == "Уменьшить размер платежей":
             await message.answer(
                 "Введите сумму, которую хотите внести для уменьшения размера платежей:",
@@ -1353,7 +1353,7 @@ async def choose_early_repayment_type(message: types.Message, state: FSMContext)
                 reply_markup=types.ReplyKeyboardRemove()
             )
             await state.set_state(EarlyRepaymentStates.enter_amount)
-            
+
     except Exception as e:
         logging.error(f"Ошибка при выборе типа погашения: {e}", exc_info=True)
         await message.answer("⚠ Ошибка при обработке запроса")
@@ -1368,12 +1368,12 @@ async def process_early_repayment_amount(message: types.Message, state: FSMConte
         amount = Decimal(message.text)
         if amount <= 0:
             raise ValueError("Сумма должна быть больше нуля")
-        
+
         data = await state.get_data()
         loan_id = data['loan_id']
         repayment_type = data['repayment_type']
         current_date = date.today()
-        
+
         async with async_session() as session:
             # Получаем кредит с типом (для процентной ставки)
             loan = await session.get(Loan, loan_id, options=[joinedload(Loan.loan_type)])
@@ -1381,13 +1381,13 @@ async def process_early_repayment_amount(message: types.Message, state: FSMConte
                 await message.answer("❌ Кредит не найден")
                 await state.clear()
                 return
-            
+
             if amount > loan.remaining_amount:
                 amount = loan.remaining_amount
                 await message.answer(
                     f"⚠ Сумма превышает остаток долга. Будет зачислено {amount:.2f} руб."
                 )
-            
+
             # Получаем все платежи по кредиту
             payments = await session.scalars(
                 select(Payment)
@@ -1433,8 +1433,8 @@ async def process_early_repayment_amount(message: types.Message, state: FSMConte
 
                 # Находим дату последнего совершенного платежа
                 last_paid_date = max(
-                    p.payment_date_plan 
-                    for p in payments_list 
+                    p.payment_date_plan
+                    for p in payments_list
                     if p.payment_date_fact is not None
                 ) if any(p.payment_date_fact is not None for p in payments_list) else loan.issue_date
 
@@ -1445,7 +1445,7 @@ async def process_early_repayment_amount(message: types.Message, state: FSMConte
                     original_amount = Decimal(str(loan.amount))
                     paid_ratio = (original_amount - loan.remaining_amount) / original_amount
                     new_term = max(1, math.floor(remaining_term * (1 - paid_ratio)))
-                    
+
                     # Генерируем новый график платежей с пересчетом процентов
                     new_payments = await generate_payment_schedule(
                         loan_id=loan_id,
@@ -1455,10 +1455,10 @@ async def process_early_repayment_amount(message: types.Message, state: FSMConte
                         start_date=last_paid_date,
                         session=session
                     )
-                    
+
                     # Получаем новый размер платежа
                     new_monthly_payment = Decimal(str(new_payments[0].planned_amount)) if new_payments else Decimal('0')
-                    
+
                     response_msg = (
                         "✅ <b>Досрочное погашение успешно зачислено!</b>\n\n"
                         f"🔹 Номер кредита: #{loan_id}\n"

@@ -18,7 +18,7 @@ async def generate_no_obligations_doc(loan_id: int, session: AsyncSession) -> Op
         if not client:
             return None
 
-        if loan.status != LoanStatus.PAID:
+        if loan.status != LoanStatus.CLOSED:
             return None
 
         total_paid = await session.scalar(
@@ -59,7 +59,7 @@ async def generate_court_notice(loan_id: int, session: AsyncSession) -> Optional
             select(Payment)
             .where(Payment.loan_id == loan_id)
             .where(Payment.payment_date_fact.is_(None))
-            .where(Payment.payment_date_plan < date.today())
+            .where(Payment.payment_date_plan < date(2025, 10, 4)) # Изменил с date.today() для проверки
         )
         overdue_payments = payments.all()
 
