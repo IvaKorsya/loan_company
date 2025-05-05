@@ -183,6 +183,7 @@ async def process_court_notice(message: types.Message):
 
     await message.answer(notice_text, parse_mode=ParseMode.HTML)
 
+
 @router.callback_query(F.data == "admin_financial_report")
 async def financial_report_start(callback: types.CallbackQuery):
     """Запрос года для финансового отчета"""
